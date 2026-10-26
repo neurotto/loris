@@ -1,0 +1,4 @@
+.audit-tools/
+audit-results/
+__pycache__/
+*.pyc
