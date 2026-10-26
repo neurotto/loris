@@ -1,0 +1,98 @@
+enabled: false
+
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+image:
+  repository: docker.io/scilus/loris
+  tag: 29.0.0
+  digest: ""
+  pullPolicy: IfNotPresent
+
+database:
+  image: mariadb:10.11.10
+  name: loris
+  secretName: loris-credentials
+  rootPasswordKey: MARIADB_ROOT_PASSWORD
+  appPasswordKey: LORIS_DB_PASSWORD
+  adminPasswordKey: LORIS_FRONTEND_ADMIN_PASSWORD
+  persistence:
+    enabled: false
+    existingClaim: ""
+    storageClassName: ""
+    size: 5Gi
+    accessModes: [ReadWriteOnce]
+  emptyDir:
+    medium: Memory
+    sizeLimit: 5Gi
+
+loris:
+  databaseUser: loris
+  adminUser: admin
+  publicUrl: http://loris.local
+  # Modules the deployment depends on are always kept active: api (serves
+  # imaging-browser thumbnails and BrainBrowser volumes), imaging_browser and
+  # brainbrowser. They are re-enabled at every portal start, and the Module
+  # Manager refuses to deactivate them. List extra modules to protect the same way;
+  # the built-in set cannot be removed. Every other module is owned by LORIS admins:
+  # Argo sync and portal restarts never change its Module Manager state.
+  additionalRequiredModules: []
+  project:
+    persistence:
+      enabled: false
+      existingClaim: ""
+      storageClassName: ""
+      size: 1Gi
+      accessModes: [ReadWriteOnce]
+    emptyDir:
+      sizeLimit: 1Gi
+  data:
+    persistence:
+      enabled: false
+      existingClaim: ""
+      storageClassName: ""
+      size: 6Gi
+      accessModes: [ReadWriteOnce]
+    emptyDir:
+      sizeLimit: 6Gi
+  servicePort: 80
+  replicas: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      memory: 4Gi
+
+ingress:
+  enabled: false
+  definitions:
+    - name: loris
+      className: ""
+      annotations: {}
+      tls: []
+      hosts:
+        - host: loris.local
+          paths:
+            - path: /
+              pathType: Prefix
+
+sites: []
+
+bidsImport:
+  enabled: false
+  schedule: "0 2 * * *"
+  timeZone: Etc/UTC
+  suspend: false
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 604800
+  defaults:
+    mode: import
+    createCandidates: false
+    createSessions: false
+    datasetType: raw
+    project: ""
+    projectAlias: ""
+    recruitmentTarget: null
+    defaultVisit: "000"

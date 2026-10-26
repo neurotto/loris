@@ -1,0 +1,38 @@
+diff --git a/modules/brainbrowser/js/brainbrowser.loris.js b/modules/brainbrowser/js/brainbrowser.loris.js
+--- a/modules/brainbrowser/js/brainbrowser.loris.js
++++ b/modules/brainbrowser/js/brainbrowser.loris.js
+@@ -24,7 +24,7 @@
+ // This script is meant to be a demonstration of how to
+ // use most of the functionality available in the
+ // BrainBrowser Volume Viewer.
+-$(function() {
++function initializeBrainBrowser() {
+   'use strict';
+ 
+   $('.button').button();
+@@ -861,4 +861,25 @@
+       '<p>Something went wrong while trying to render your files.</p>'
+     );
+   });
++}
++
++$(function() {
++  'use strict';
++
++  if (document.getElementById('brainbrowser')) {
++    initializeBrainBrowser();
++    return;
++  }
++  const root = document.getElementById('brainbrowserPage');
++  if (!root) {
++    throw new Error('BrainBrowser React root is missing');
++  }
++  // React createRoot may commit after jQuery's document-ready callbacks.
++  const observer = new MutationObserver(function() {
++    if (document.getElementById('brainbrowser')) {
++      observer.disconnect();
++      initializeBrainBrowser();
++    }
++  });
++  observer.observe(root, {childList: true, subtree: true});
+ });

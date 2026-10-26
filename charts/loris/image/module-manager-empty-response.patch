@@ -1,0 +1,16 @@
+diff --git a/modules/module_manager/php/modules.class.inc b/modules/module_manager/php/modules.class.inc
+--- a/modules/module_manager/php/modules.class.inc
++++ b/modules/module_manager/php/modules.class.inc
+@@ -30,5 +30,12 @@
+ class Modules extends \NDB_Page
+ {
++    public function process(
++        ServerRequestInterface $request,
++        \Psr\Http\Server\RequestHandlerInterface $handler
++    ): ResponseInterface {
++        return $handler->handle($request);
++    }
++
+     /**
+      * Edit access is required because the modules endpoint only handles
+      * PATCH requests.

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: loris
+description: Central LORIS development portal and optional read-only BIDS mounts
+type: application
+version: 0.1.0
+appVersion: 29.0.0

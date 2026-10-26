@@ -1,0 +1,23 @@
+{{- if .Values.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loris-mariadb
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: loris-mariadb
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loris
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loris-bids
+      ports:
+        - protocol: TCP
+          port: 3306
+{{- end }}

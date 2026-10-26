@@ -1,0 +1,22 @@
+diff --git a/modules/module_manager/php/modules.class.inc b/modules/module_manager/php/modules.class.inc
+--- a/modules/module_manager/php/modules.class.inc
++++ b/modules/module_manager/php/modules.class.inc
+@@ -115,6 +115,18 @@ class Modules extends \NDB_Page
+             return new \LORIS\Http\Response\JSON\BadRequest();
+         }
+ 
++        // Deployment-required modules (LORIS_REQUIRED_MODULES, a JSON list set
++        // by the Helm chart) cannot be deactivated; other modules stay free.
++        $required = json_decode((string)getenv('LORIS_REQUIRED_MODULES'), true);
++        if (is_array($required)
++            && in_array($modulename, $required, true)
++            && $vals['Active'] !== 'Y'
++        ) {
++            return new \LORIS\Http\Response\JSON\Conflict(
++                "$modulename is required by this deployment and must stay active"
++            );
++        }
++
+         \NDB_Factory::singleton()->database()->update(
+             'modules',
+             ['Active' => $vals['Active']],

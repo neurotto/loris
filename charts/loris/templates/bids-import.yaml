@@ -1,0 +1,202 @@
+{{- if .Values.enabled }}
+{{- include "loris.bids.validate" . }}
+{{- if .Values.bidsImport.enabled }}
+{{- $root := . }}
+{{- range .Values.sites }}
+{{- $import := .bidsImport | default dict }}
+{{- if and .enabled ($import.enabled | default false) }}
+{{- $name := printf "loris-bids-%s" .name }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-profile
+data:
+{{- range $path, $_ := $root.Files.Glob "files/*.py" }}
+  {{ base $path }}: |
+{{ $root.Files.Get $path | indent 4 }}
+{{- end }}
+  runtime.json: |
+    {{ dict "namespace" $root.Release.Namespace "cronJob" $name "site" . "bidsImport" $root.Values.bidsImport | toJson }}
+  config.py: |
+    import os
+    from lib.config_file import DatabaseConfig
+
+    mysql = DatabaseConfig(
+        host=os.environ['LORIS_DB_HOST'],
+        username=os.environ['LORIS_DB_USER'],
+        password=os.environ['LORIS_DB_PASSWORD'],
+        database=os.environ['LORIS_DB_NAME'],
+    )
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, create]
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    resourceNames: [{{ $name }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $root.Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/name: loris-bids
+    app.kubernetes.io/component: bids-discovery
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  schedule: {{ $import.schedule | default $root.Values.bidsImport.schedule | quote }}
+  timeZone: {{ $import.timeZone | default $root.Values.bidsImport.timeZone | quote }}
+  suspend: {{ if hasKey $import "suspend" }}{{ $import.suspend }}{{ else }}{{ $root.Values.bidsImport.suspend }}{{ end }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loris-bids
+        app.kubernetes.io/component: bids-discovery
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ $root.Values.bidsImport.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: {{ $root.Values.bidsImport.ttlSecondsAfterFinished }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: loris-bids
+            app.kubernetes.io/component: bids-discovery
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ $name }}
+          automountServiceAccountToken: true
+          {{- with $root.Values.nodeSelector }}
+          nodeSelector:
+{{ toYaml . | indent 12 }}
+          {{- end }}
+          {{- with $root.Values.tolerations }}
+          tolerations:
+{{ toYaml . | indent 12 }}
+          {{- end }}
+          {{- with $root.Values.affinity }}
+          affinity:
+{{ toYaml . | indent 12 }}
+          {{- end }}
+          initContainers:
+            - name: initialize-import-ledger
+              image: {{ include "loris.image" $root | quote }}
+              imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+              command: [python3, /import-profile/bids_runtime.py]
+              args: [initialize, --config, /import-profile/runtime.json]
+              securityContext:
+                runAsUser: 33
+                runAsGroup: 33
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              env:
+                - name: LORIS_CONFIG
+                  value: /import-profile
+                - name: LORIS_DB_HOST
+                  value: loris-mariadb
+                - name: LORIS_DB_USER
+                  value: root
+                - name: LORIS_DB_NAME
+                  value: {{ $root.Values.database.name | quote }}
+                - name: LORIS_DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $root.Values.database.secretName }}
+                      key: {{ $root.Values.database.rootPasswordKey }}
+              volumeMounts:
+                - name: profile
+                  mountPath: /import-profile
+                  readOnly: true
+          containers:
+            - name: bids-import
+              image: {{ include "loris.image" $root | quote }}
+              imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+              command: [python3, /import-profile/bids_runtime.py]
+              args: [discover, --config, /import-profile/runtime.json]
+              securityContext:
+                runAsUser: 33
+                runAsGroup: 33
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              env:
+                - name: LORIS_CONFIG
+                  value: /import-profile
+                - name: LORIS_DB_HOST
+                  value: loris-mariadb
+                - name: LORIS_DB_USER
+                  value: {{ $root.Values.loris.databaseUser | quote }}
+                - name: LORIS_DB_NAME
+                  value: {{ $root.Values.database.name | quote }}
+                - name: LORIS_DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $root.Values.database.secretName }}
+                      key: {{ $root.Values.database.appPasswordKey }}
+                - name: LORIS_ADMIN_USER
+                  value: {{ $root.Values.loris.adminUser | quote }}
+                - name: LORIS_FRONTEND_ADMIN_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $root.Values.database.secretName }}
+                      key: {{ $root.Values.database.adminPasswordKey }}
+              resources:
+{{ toYaml $root.Values.loris.resources | indent 16 }}
+              volumeMounts:
+                - name: profile
+                  mountPath: /import-profile
+                  readOnly: true
+                - name: loris-data
+                  mountPath: /data/loris
+                - name: site-data
+                  mountPath: /data/loris/data/assembly_bids/{{ .name }}
+                  readOnly: true
+          volumes:
+            - name: profile
+              configMap:
+                name: {{ $name }}-profile
+            - name: loris-data
+              persistentVolumeClaim:
+                claimName: {{ $root.Values.loris.data.persistence.existingClaim | default "loris-data" | quote }}
+            - name: site-data
+              persistentVolumeClaim:
+                claimName: loris-bids-{{ .name }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

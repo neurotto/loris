@@ -1,0 +1,95 @@
+{{- if .Values.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: loris-mariadb
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+  selector:
+    app.kubernetes.io/name: loris-mariadb
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loris-mariadb
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  serviceName: loris-mariadb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loris-mariadb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loris-mariadb
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+      containers:
+        - name: mariadb
+          image: {{ .Values.database.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: mysql
+              containerPort: 3306
+          env:
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.secretName }}
+                  key: {{ .Values.database.rootPasswordKey }}
+            - name: MARIADB_DATABASE
+              value: {{ .Values.database.name | quote }}
+            - name: MARIADB_ROOT_HOST
+              value: "%"
+          readinessProbe:
+            exec:
+              command: [healthcheck.sh, --connect, --innodb_initialized]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          volumeMounts:
+            - name: database
+              mountPath: /var/lib/mysql
+      {{- if not .Values.database.persistence.enabled }}
+      volumes:
+        - name: database
+          emptyDir:
+{{ toYaml .Values.database.emptyDir | indent 12 }}
+      {{- else if .Values.database.persistence.existingClaim }}
+      volumes:
+        - name: database
+          persistentVolumeClaim:
+            claimName: {{ .Values.database.persistence.existingClaim | quote }}
+      {{- end }}
+  {{- if and .Values.database.persistence.enabled (not .Values.database.persistence.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: database
+      spec:
+        accessModes:
+      {{ toYaml .Values.database.persistence.accessModes | indent 10 }}
+        {{- with .Values.database.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.database.persistence.size }}
+        {{- end }}
+{{- end }}

@@ -1,0 +1,42 @@
+{{- if .Values.enabled }}
+{{- range .Values.sites }}
+{{- if .enabled }}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: loris-bids-{{ .name }}
+spec:
+  capacity:
+    storage: {{ .capacity | default "1Ti" }}
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - nfsvers=4.1
+    - proto=tcp
+    - port={{ .nfsPort | default 20490 | int64 }}
+    - soft
+    - timeo=100
+    - retrans=2
+  nfs:
+    server: {{ .server }}
+    path: /bids
+    readOnly: true
+  claimRef:
+    namespace: {{ $.Release.Namespace }}
+    name: loris-bids-{{ .name }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loris-bids-{{ .name }}
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: ""
+  volumeName: loris-bids-{{ .name }}
+  resources:
+    requests:
+      storage: {{ .capacity | default "1Ti" }}
+{{- end }}
+{{- end }}
+{{- end }}

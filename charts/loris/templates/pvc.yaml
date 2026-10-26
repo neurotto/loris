@@ -1,0 +1,23 @@
+{{- if .Values.enabled }}
+{{- range $volume := list "project" "data" }}
+{{- $storage := index $.Values.loris $volume }}
+{{- if and $storage.persistence.enabled (not $storage.persistence.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loris-{{ $volume }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  accessModes:
+{{ toYaml $storage.persistence.accessModes | indent 4 }}
+  {{- with $storage.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $storage.persistence.size }}
+{{- end }}
+{{- end }}
+{{- end }}

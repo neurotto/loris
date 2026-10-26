@@ -1,0 +1,105 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loris
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  replicas: {{ .Values.loris.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loris
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loris
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+      initContainers:
+      {{- include "loris.bootstrap" . | nindent 8 }}
+      containers:
+        - name: loris
+          image: {{ include "loris.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # Read by the patched Module Manager, which refuses to deactivate these.
+            - name: LORIS_REQUIRED_MODULES
+              value: {{ include "loris.requiredModules" . | quote }}
+          ports:
+            - name: http
+              containerPort: 80
+          resources:
+{{ toYaml .Values.loris.resources | indent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          volumeMounts:
+            - name: project-state
+              mountPath: /var/www/loris/project
+            - name: loris-data
+              mountPath: /data/loris
+            {{- range .Values.sites }}
+            {{- if .enabled }}
+            - name: site-{{ .name }}
+              mountPath: /data/loris/data/assembly_bids/{{ .name }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
+      volumes:
+        - name: project-state
+          {{- if .Values.loris.project.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.loris.project.persistence.existingClaim | default "loris-project" | quote }}
+          {{- else }}
+          emptyDir:
+{{ toYaml .Values.loris.project.emptyDir | indent 12 }}
+          {{- end }}
+        - name: loris-data
+          {{- if .Values.loris.data.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.loris.data.persistence.existingClaim | default "loris-data" | quote }}
+          {{- else }}
+          emptyDir:
+{{ toYaml .Values.loris.data.emptyDir | indent 12 }}
+          {{- end }}
+        {{- range .Values.sites }}
+        {{- if .enabled }}
+        - name: site-{{ .name }}
+          persistentVolumeClaim:
+            claimName: loris-bids-{{ .name }}
+        {{- end }}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loris
+spec:
+  ports:
+    - name: http
+      port: {{ .Values.loris.servicePort }}
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: loris
+{{- end }}
