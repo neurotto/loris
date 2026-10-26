@@ -1,0 +1,14 @@
+apiVersion: v1
+entries:
+  loris-nfs-export:
+  - apiVersion: v2
+    appVersion: 0.3.0
+    created: "2026-10-26T20:53:41.24666314Z"
+    description: Read-only NFSv4 export for an approved site BIDS directory
+    digest: bf291a98ca8da748bba44041f1ccfaae161f804d011f0d12a52c00bc25bcc162
+    name: loris-nfs-export
+    type: application
+    urls:
+    - https://github.com/neurotto/loris/releases/download/loris-nfs-export-0.1.0/loris-nfs-export-0.1.0.tgz
+    version: 0.1.0
+generated: "2026-10-26T20:53:41.246672624Z"
