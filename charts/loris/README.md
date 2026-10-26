@@ -1,6 +1,6 @@
 # LORIS Helm chart
 
-Deploy [LORIS](https://loris.ca/), a web-based platform for managing neuroimaging
+Deploy [LORIS](https://loris.ca/), a web-based platform to manage neuroimaging
 and research data, with a bundled MariaDB database and optional read-only BIDS
 dataset mounts.
 
@@ -76,11 +76,11 @@ kubectl create namespace loris
 Provision a Secret named `loris-credentials` in that namespace using your secret
 manager, Sealed Secrets, or another approved workflow. Its default keys are:
 
-| Secret key | Purpose |
-| --- | --- |
-| `MARIADB_ROOT_PASSWORD` | MariaDB root account and privileged initialization |
-| `LORIS_DB_PASSWORD` | LORIS application database account |
-| `LORIS_FRONTEND_ADMIN_PASSWORD` | Initial frontend administrator password |
+| Secret key                        | Purpose                                            |
+| --------------------------------- | -------------------------------------------------- |
+| `MARIADB_ROOT_PASSWORD`         | MariaDB root account and privileged initialization |
+| `LORIS_DB_PASSWORD`             | LORIS application database account                 |
+| `LORIS_FRONTEND_ADMIN_PASSWORD` | Initial frontend administrator password            |
 
 Use distinct, strong, nonempty passwords. Do not commit them to Git or put them
 in a Helm values file. For a manual installation, an existing, access-restricted
@@ -135,7 +135,7 @@ helm upgrade --install loris ./charts/loris \
 kubectl -n loris port-forward service/loris 8080:80
 ```
 
-Open <http://localhost:8080> and sign in as `admin` using the frontend password
+Open [http://localhost:8080](http://localhost:8080) and sign in as `admin` using the frontend password
 you provisioned. If you change `loris.servicePort`, adjust the port-forward's
 remote port accordingly.
 
@@ -147,21 +147,21 @@ bootstrap causes an explicit failure.
 
 ## Storage
 
-| State | Mount path | Default when persistence is disabled | Default persistent size | Generated claim |
-| --- | --- | --- | --- | --- |
-| MariaDB | `/var/lib/mysql` | RAM-backed `emptyDir`, limit `5Gi` | `5Gi` | `database-loris-mariadb-0` |
-| Project/configuration | `/var/www/loris/project` | `emptyDir`, limit `1Gi` | `1Gi` | `loris-project` |
-| Application data | `/data/loris` | `emptyDir`, limit `6Gi` | `6Gi` | `loris-data` |
+| State                 | Mount path                 | Default when persistence is disabled   | Default persistent size | Generated claim              |
+| --------------------- | -------------------------- | -------------------------------------- | ----------------------- | ---------------------------- |
+| MariaDB               | `/var/lib/mysql`         | RAM-backed `emptyDir`, limit `5Gi` | `5Gi`                 | `database-loris-mariadb-0` |
+| Project/configuration | `/var/www/loris/project` | `emptyDir`, limit `1Gi`            | `1Gi`                 | `loris-project`            |
+| Application data      | `/data/loris`            | `emptyDir`, limit `6Gi`            | `6Gi`                 | `loris-data`               |
 
 All three persistence sections share these settings:
 
-| Setting suffix | Default | Description |
-| --- | --- | --- |
-| `persistence.enabled` | `false` | Use a PVC instead of `emptyDir`. |
-| `persistence.existingClaim` | `""` | Use an existing claim instead of creating one; requires persistence enabled. |
-| `persistence.storageClassName` | `""` | StorageClass for a generated claim. Empty means the field is omitted and cluster defaulting applies. |
-| `persistence.size` | See above | Requested capacity for a generated claim. |
-| `persistence.accessModes` | `[ReadWriteOnce]` | Access modes for a generated claim. |
+| Setting suffix                   | Default             | Description                                                                                          |
+| -------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------- |
+| `persistence.enabled`          | `false`           | Use a PVC instead of `emptyDir`.                                                                   |
+| `persistence.existingClaim`    | `""`              | Use an existing claim instead of creating one; requires persistence enabled.                         |
+| `persistence.storageClassName` | `""`              | StorageClass for a generated claim. Empty means the field is omitted and cluster defaulting applies. |
+| `persistence.size`             | See above           | Requested capacity for a generated claim.                                                            |
+| `persistence.accessModes`      | `[ReadWriteOnce]` | Access modes for a generated claim.                                                                  |
 
 Apply these suffixes under `database`, `loris.project`, or `loris.data`.
 For example, set `loris.data.persistence.existingClaim` to reuse an application
@@ -243,15 +243,15 @@ sites:
       enabled: false
 ```
 
-| Site field | Default | Description |
-| --- | --- | --- |
-| `name` | Required | Unique lowercase DNS label, at most 40 characters; also used for the LORIS site name and mount directory. |
-| `enabled` | Set explicitly | Create the site PV/PVC and mount it in the portal. |
-| `server` | Required for enabled sites | NFS server address reachable from eligible cluster nodes. |
-| `nfsPort` | `20490` | NFS TCP port. |
-| `capacity` | `1Ti` | Declared PV/PVC capacity, not an enforced NFS quota. |
-| `siteAlias` | Required for imports | Unique 1–4 character LORIS site alias. |
-| `bidsImport` | Disabled unless enabled explicitly | Site-specific discovery and registration settings. |
+| Site field     | Default                            | Description                                                                                               |
+| -------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `name`       | Required                           | Unique lowercase DNS label, at most 40 characters; also used for the LORIS site name and mount directory. |
+| `enabled`    | Set explicitly                     | Create the site PV/PVC and mount it in the portal.                                                        |
+| `server`     | Required for enabled sites         | NFS server address reachable from eligible cluster nodes.                                                 |
+| `nfsPort`    | `20490`                          | NFS TCP port.                                                                                             |
+| `capacity`   | `1Ti`                            | Declared PV/PVC capacity, not an enforced NFS quota.                                                      |
+| `siteAlias`  | Required for imports               | Unique 1–4 character LORIS site alias.                                                                   |
+| `bidsImport` | Disabled unless enabled explicitly | Site-specific discovery and registration settings.                                                        |
 
 Volumes use `ReadOnlyMany`, a `Retain` reclaim policy, and NFS mount options
 `nfsvers=4.1,proto=tcp,port=<nfsPort>,soft,timeo=100,retrans=2`. The source must
@@ -339,17 +339,17 @@ Registration settings resolve in this order, with the last taking precedence:
 Lists such as `sites` replace the previous list when Helm merges values; include
 all sites you intend to keep.
 
-| Registration setting | Default | Description |
-| --- | --- | --- |
-| `mode` | `import` | `preflight`, `setup`, or `import`; start with `preflight`. |
-| `project` | `""` | Required nonempty LORIS project name when importing is enabled. |
-| `projectAlias` | `""` | Required 1–4 character project alias. |
-| `cohort` | Dataset `Name` | Optional cohort override. Empty or absent uses `dataset_description.json` `Name`. |
-| `recruitmentTarget` | `null` | Positive integer or `null`. |
-| `defaultVisit` | `"000"` | Nonempty visit label used for subjects without session directories; keep it quoted. |
-| `datasetType` | `raw` | `raw` or `derivative`. |
-| `createCandidates` | `false` | Allow the importer to create candidates. Otherwise, provision them first. |
-| `createSessions` | `false` | Allow the importer to create sessions. Otherwise, provision them first. |
+| Registration setting  | Default          | Description                                                                           |
+| --------------------- | ---------------- | ------------------------------------------------------------------------------------- |
+| `mode`              | `import`       | `preflight`, `setup`, or `import`; start with `preflight`.                    |
+| `project`           | `""`           | Required nonempty LORIS project name when importing is enabled.                       |
+| `projectAlias`      | `""`           | Required 1–4 character project alias.                                                |
+| `cohort`            | Dataset `Name` | Optional cohort override. Empty or absent uses `dataset_description.json` `Name`. |
+| `recruitmentTarget` | `null`         | Positive integer or `null`.                                                         |
+| `defaultVisit`      | `"000"`        | Nonempty visit label used for subjects without session directories; keep it quoted.   |
+| `datasetType`       | `raw`          | `raw` or `derivative`.                                                            |
+| `createCandidates`  | `false`        | Allow the importer to create candidates. Otherwise, provision them first.             |
+| `createSessions`    | `false`        | Allow the importer to create sessions. Otherwise, provision them first.               |
 
 `preflight` checks source metadata, read-only mounting, and data/log directory
 configuration without registering scans or project/site/cohort metadata. Discovery
@@ -392,14 +392,14 @@ Fingerprinting reads the included dataset contents, even during discovery;
 account for source size and network throughput when choosing the schedule and
 Job deadline.
 
-| Scheduling value | Default | Description |
-| --- | --- | --- |
-| `bidsImport.enabled` | `false` | Global import resource switch. |
-| `bidsImport.schedule` | `"0 2 * * *"` | Five-field cron expression or supported cron shorthand. |
-| `bidsImport.timeZone` | `Etc/UTC` | CronJob time zone. |
-| `bidsImport.suspend` | `false` | Suspend scheduled discovery; does not stop existing Jobs. |
-| `bidsImport.activeDeadlineSeconds` | `3600` | Deadline for each discovery or worker Job. |
-| `bidsImport.ttlSecondsAfterFinished` | `604800` | Finished Job retention in seconds (seven days). |
+| Scheduling value                       | Default         | Description                                               |
+| -------------------------------------- | --------------- | --------------------------------------------------------- |
+| `bidsImport.enabled`                 | `false`       | Global import resource switch.                            |
+| `bidsImport.schedule`                | `"0 2 * * *"` | Five-field cron expression or supported cron shorthand.   |
+| `bidsImport.timeZone`                | `Etc/UTC`     | CronJob time zone.                                        |
+| `bidsImport.suspend`                 | `false`       | Suspend scheduled discovery; does not stop existing Jobs. |
+| `bidsImport.activeDeadlineSeconds`   | `3600`        | Deadline for each discovery or worker Job.                |
+| `bidsImport.ttlSecondsAfterFinished` | `604800`      | Finished Job retention in seconds (seven days).           |
 
 Sites can override `schedule`, `timeZone`, and `suspend` inside their
 `bidsImport` section. Dataset overrides can set registration fields and `enabled`,
@@ -414,43 +414,43 @@ have application credentials and no mounted service-account token.
 The tables above cover persistence, sites, and imports. The remaining chart
 values are listed below.
 
-| Value | Default | Description |
-| --- | --- | --- |
-| `enabled` | `false` | Render chart resources. With the default, no workloads are created. |
-| `image.repository` | `docker.io/scilus/loris` | Custom LORIS image repository. |
-| `image.tag` | `29.0.0` | Image tag. |
-| `image.digest` | `""` | Optional `sha256:` digest with 64 lowercase hexadecimal characters; pins content when set. |
-| `image.pullPolicy` | `IfNotPresent` | Pull policy for portal and import containers. |
-| `database.image` | `mariadb:10.11.10` | Bundled database image; pulled with `IfNotPresent`. |
-| `database.name` | `loris` | Database name; must start with a letter and contain only letters, digits, or underscores. |
-| `database.secretName` | `loris-credentials` | Existing credentials Secret. |
-| `database.rootPasswordKey` | `MARIADB_ROOT_PASSWORD` | Root password key in the Secret. |
-| `database.appPasswordKey` | `LORIS_DB_PASSWORD` | Application database password key. |
-| `database.adminPasswordKey` | `LORIS_FRONTEND_ADMIN_PASSWORD` | Initial frontend administrator password key. |
-| `database.emptyDir.medium` | `Memory` | Ephemeral database volume medium. |
-| `database.emptyDir.sizeLimit` | `5Gi` | Ephemeral database volume size limit. |
-| `loris.databaseUser` | `loris` | Application database username. |
-| `loris.adminUser` | `admin` | Initial frontend administrator username. |
-| `loris.publicUrl` | `http://loris.local` | Absolute public URL used during bootstrap; use a dedicated hostname with no sub-path. |
-| `loris.additionalRequiredModules` | `[]` | Additional module names to keep active. |
-| `loris.servicePort` | `80` | ClusterIP Service port; container HTTP port remains 80. |
-| `loris.replicas` | `1` | Portal replicas; one is recommended. |
-| `loris.project.emptyDir.sizeLimit` | `1Gi` | Ephemeral project volume size limit. |
-| `loris.data.emptyDir.sizeLimit` | `6Gi` | Ephemeral data volume size limit. |
-| `loris.resources.requests.cpu` | `500m` | Portal and import-container CPU request. |
-| `loris.resources.requests.memory` | `1Gi` | Portal and import-container memory request. |
-| `loris.resources.limits.memory` | `4Gi` | Portal and import-container memory limit. |
-| `nodeSelector` | `{}` | Node selection for database, portal, and import Pods. |
-| `affinity` | `{}` | Affinity for database, portal, and import Pods. |
-| `tolerations` | `[]` | Tolerations for database, portal, and import Pods. |
-| `ingress.enabled` | `false` | Create configured Ingress resources. |
-| `ingress.definitions` | One `loris` definition for `loris.local` at `/` | List of ingress definitions; see the TLS example above. |
-| `ingress.definitions[].name` | `loris` | Required Ingress resource name. |
-| `ingress.definitions[].className` | `""` | Optional ingress class. |
-| `ingress.definitions[].annotations` | `{}` | Controller-specific annotations. |
-| `ingress.definitions[].tls` | `[]` | Kubernetes Ingress TLS entries. |
-| `ingress.definitions[].hosts` | `loris.local`, `/`, `Prefix` | Host rules with `host` and `paths` (`path`, `pathType`). |
-| `sites` | `[]` | Optional read-only site mounts. |
+| Value                                 | Default                                               | Description                                                                                  |
+| ------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `enabled`                           | `false`                                             | Render chart resources. With the default, no workloads are created.                          |
+| `image.repository`                  | `docker.io/scilus/loris`                            | Custom LORIS image repository.                                                               |
+| `image.tag`                         | `29.0.0`                                            | Image tag.                                                                                   |
+| `image.digest`                      | `""`                                                | Optional `sha256:` digest with 64 lowercase hexadecimal characters; pins content when set. |
+| `image.pullPolicy`                  | `IfNotPresent`                                      | Pull policy for portal and import containers.                                                |
+| `database.image`                    | `mariadb:10.11.10`                                  | Bundled database image; pulled with `IfNotPresent`.                                        |
+| `database.name`                     | `loris`                                             | Database name; must start with a letter and contain only letters, digits, or underscores.    |
+| `database.secretName`               | `loris-credentials`                                 | Existing credentials Secret.                                                                 |
+| `database.rootPasswordKey`          | `MARIADB_ROOT_PASSWORD`                             | Root password key in the Secret.                                                             |
+| `database.appPasswordKey`           | `LORIS_DB_PASSWORD`                                 | Application database password key.                                                           |
+| `database.adminPasswordKey`         | `LORIS_FRONTEND_ADMIN_PASSWORD`                     | Initial frontend administrator password key.                                                 |
+| `database.emptyDir.medium`          | `Memory`                                            | Ephemeral database volume medium.                                                            |
+| `database.emptyDir.sizeLimit`       | `5Gi`                                               | Ephemeral database volume size limit.                                                        |
+| `loris.databaseUser`                | `loris`                                             | Application database username.                                                               |
+| `loris.adminUser`                   | `admin`                                             | Initial frontend administrator username.                                                     |
+| `loris.publicUrl`                   | `http://loris.local`                                | Absolute public URL used during bootstrap; use a dedicated hostname with no sub-path.        |
+| `loris.additionalRequiredModules`   | `[]`                                                | Additional module names to keep active.                                                      |
+| `loris.servicePort`                 | `80`                                                | ClusterIP Service port; container HTTP port remains 80.                                      |
+| `loris.replicas`                    | `1`                                                 | Portal replicas; one is recommended.                                                         |
+| `loris.project.emptyDir.sizeLimit`  | `1Gi`                                               | Ephemeral project volume size limit.                                                         |
+| `loris.data.emptyDir.sizeLimit`     | `6Gi`                                               | Ephemeral data volume size limit.                                                            |
+| `loris.resources.requests.cpu`      | `500m`                                              | Portal and import-container CPU request.                                                     |
+| `loris.resources.requests.memory`   | `1Gi`                                               | Portal and import-container memory request.                                                  |
+| `loris.resources.limits.memory`     | `4Gi`                                               | Portal and import-container memory limit.                                                    |
+| `nodeSelector`                      | `{}`                                                | Node selection for database, portal, and import Pods.                                        |
+| `affinity`                          | `{}`                                                | Affinity for database, portal, and import Pods.                                              |
+| `tolerations`                       | `[]`                                                | Tolerations for database, portal, and import Pods.                                           |
+| `ingress.enabled`                   | `false`                                             | Create configured Ingress resources.                                                         |
+| `ingress.definitions`               | One `loris` definition for `loris.local` at `/` | List of ingress definitions; see the TLS example above.                                      |
+| `ingress.definitions[].name`        | `loris`                                             | Required Ingress resource name.                                                              |
+| `ingress.definitions[].className`   | `""`                                                | Optional ingress class.                                                                      |
+| `ingress.definitions[].annotations` | `{}`                                                | Controller-specific annotations.                                                             |
+| `ingress.definitions[].tls`         | `[]`                                                | Kubernetes Ingress TLS entries.                                                              |
+| `ingress.definitions[].hosts`       | `loris.local`, `/`, `Prefix`                    | Host rules with `host` and `paths` (`path`, `pathType`).                             |
+| `sites`                             | `[]`                                                | Optional read-only site mounts.                                                              |
 
 `loris.resources` does not configure MariaDB or the portal's init containers.
 Account for those processes separately when sizing the deployment.
