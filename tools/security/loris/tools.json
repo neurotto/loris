@@ -1,0 +1,32 @@
+{
+  "helm": {
+    "version": "3.18.4",
+    "url": "https://get.helm.sh/helm-v3.18.4-linux-amd64.tar.gz",
+    "sha256": "f8180838c23d7c7d797b208861fecb591d9ce1690d8704ed1e4cb8e2add966c1",
+    "member": "linux-amd64/helm"
+  },
+  "trivy": {
+    "version": "0.76.1",
+    "url": "https://github.com/aquasecurity/trivy/releases/download/v0.76.1/trivy_0.76.1_Linux-64bit.tar.gz",
+    "sha256": "c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0",
+    "member": "trivy"
+  },
+  "kubeconform": {
+    "version": "0.8.0",
+    "url": "https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz",
+    "sha256": "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883",
+    "member": "kubeconform"
+  },
+  "actionlint": {
+    "version": "1.7.12",
+    "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz",
+    "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+    "member": "actionlint"
+  },
+  "shellcheck": {
+    "version": "0.11.0",
+    "url": "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.gz",
+    "sha256": "b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6",
+    "member": "shellcheck-v0.11.0/shellcheck"
+  }
+}

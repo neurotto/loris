@@ -1,0 +1,45 @@
+rules:
+  - id: python-dynamic-execution
+    languages: [python]
+    severity: ERROR
+    message: Dynamic Python execution requires manual input-trust review.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+  - id: python-shell-execution
+    languages: [python]
+    severity: ERROR
+    message: Shell command execution may allow injection; verify input provenance.
+    pattern-either:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - pattern: os.system(...)
+  - id: python-unsafe-deserialization
+    languages: [python]
+    severity: ERROR
+    message: Unsafe deserialization can execute attacker-controlled code.
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+      - pattern: yaml.unsafe_load(...)
+  - id: python-disabled-tls
+    languages: [python]
+    severity: ERROR
+    message: TLS certificate verification is disabled.
+    pattern-either:
+      - pattern: ssl._create_unverified_context(...)
+      - pattern: requests.$FUNC(..., verify=False, ...)
+  - id: php-dynamic-execution
+    languages: [php]
+    severity: ERROR
+    message: Dynamic PHP execution or shell invocation requires input-trust review.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: shell_exec(...)
+      - pattern: unserialize(...)
+  - id: javascript-dynamic-execution
+    languages: [javascript]
+    severity: ERROR
+    message: Dynamic JavaScript execution requires input-trust review.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: new Function(...)

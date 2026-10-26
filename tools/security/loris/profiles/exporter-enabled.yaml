@@ -1,0 +1,8 @@
+siteName: audit-site
+nodeHostname: audit-node
+dataPath: /var/local/loris-audit-source
+allowedClientCIDRs:
+  - 192.0.2.10/32
+nfsPort: 20490
+exportUid: 10001
+exportGid: 2000

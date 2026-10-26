@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LORIS security audit report",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "source_sha256", "kubernetes_version", "checks", "findings", "tools", "images", "commands", "limitations", "exit_code"],
+  "properties": {
+    "chart": {"enum": ["loris", "loris-nfs-export"]},
+    "schema_version": {"const": 1},
+    "generated_at": {"type": "string"},
+    "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "kubernetes_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "kubernetes_schema_revision": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "tools": {"type": "object", "additionalProperties": {"type": "string"}},
+    "vulnerability_database": {"type": "object"},
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "required", "status"],
+        "properties": {
+          "name": {"type": "string"},
+          "required": {"type": "boolean"},
+          "status": {"enum": ["passed", "findings", "error", "skipped"]},
+          "error": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "rule", "severity", "target", "line", "category", "verification", "remediation"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-f0-9]{16}$"},
+          "rule": {"type": "string"},
+          "severity": {"enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]},
+          "target": {"type": "string"},
+          "line": {"type": "integer", "minimum": 0},
+          "category": {"enum": ["configuration", "source", "workflow", "secret", "dependency"]},
+          "verification": {"const": "unverified"},
+          "remediation": {"type": "string"},
+          "package": {"type": "string"},
+          "installed": {"type": "string"},
+          "fixed": {"type": "string"},
+          "profile": {"type": "string"},
+          "resource": {"type": "string"},
+          "image": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "images": {"type": "array", "items": {"type": "object"}},
+    "commands": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+    "limitations": {"type": "array", "items": {"type": "string"}},
+    "exit_code": {"enum": [0, 1, 2]}
+  },
+  "additionalProperties": false
+}

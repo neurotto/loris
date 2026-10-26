@@ -1,0 +1,26 @@
+enabled: true
+database:
+  persistence:
+    enabled: true
+loris:
+  publicUrl: https://loris.audit.invalid
+  project:
+    persistence:
+      enabled: true
+  data:
+    persistence:
+      enabled: true
+ingress:
+  enabled: true
+  definitions:
+    - name: loris
+      className: audit
+      annotations: {}
+      tls:
+        - secretName: synthetic-tls
+          hosts: [loris.audit.invalid]
+      hosts:
+        - host: loris.audit.invalid
+          paths:
+            - path: /
+              pathType: Prefix

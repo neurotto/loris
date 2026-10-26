@@ -1,0 +1,23 @@
+enabled: true
+database:
+  persistence:
+    enabled: true
+loris:
+  data:
+    persistence:
+      enabled: true
+sites:
+  - name: audit-site
+    enabled: true
+    server: nfs.audit.invalid
+    nfsPort: 20490
+    siteAlias: AUD
+    bidsImport:
+      enabled: true
+bidsImport:
+  enabled: true
+  suspend: true
+  defaults:
+    mode: preflight
+    project: Synthetic Audit
+    projectAlias: AUD
