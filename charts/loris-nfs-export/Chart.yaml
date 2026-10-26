@@ -1,0 +1,6 @@
+apiVersion: v2
+name: loris-nfs-export
+description: Read-only NFSv4 export for an approved site BIDS directory
+type: application
+version: 0.1.0
+appVersion: 0.3.0

@@ -1,0 +1,22 @@
+siteName: site
+nodeHostname: ""
+# For scheduled imports, export an approved parent containing immediate BIDS dataset folders.
+# Legacy single-dataset exports require a coordinated path/record migration before changing this.
+dataPath: ""
+allowedClientCIDRs: []
+nfsPort: 20490
+exportUid: 10001
+# Owning group of dataPath; it must grant group read/traverse on the whole tree.
+exportGid: ""
+
+image:
+  repository: docker.io/scilus/loris-nfs-export
+  tag: 0.3.0
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi

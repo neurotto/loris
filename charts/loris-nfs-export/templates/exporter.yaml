@@ -1,0 +1,88 @@
+{{- if and .Values.dataPath (gt (len .Values.allowedClientCIDRs) 0) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loris-nfs-export-{{ .Values.siteName }}
+spec:
+  replicas: 1
+  # A pinned pod with a fixed hostPort cannot surge; the old pod must release the port first.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loris-nfs-export-{{ .Values.siteName }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loris-nfs-export-{{ .Values.siteName }}
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: {{ .Values.nodeHostname | quote }}
+      containers:
+        - name: nfs-ganesha
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: NFS_ALLOWED_CLIENTS
+              value: {{ join ", " .Values.allowedClientCIDRs | quote }}
+            - name: NFS_PORT
+              value: {{ .Values.nfsPort | int64 | quote }}
+            - name: EXPORT_UID
+              value: {{ .Values.exportUid | int64 | quote }}
+            # Ganesha checks mode bits only (not ACLs), so access comes from the source's group permissions.
+            - name: EXPORT_GID
+              value: {{ required "exportGid must be the source data's owning group ID" .Values.exportGid | int64 | quote }}
+          ports:
+            - name: nfs
+              containerPort: {{ .Values.nfsPort | int64 }}
+              hostPort: {{ .Values.nfsPort | int64 }}
+              protocol: TCP
+          securityContext:
+            # No hostNetwork: Ganesha would otherwise rewrite the node's rpcbind NFS registrations.
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [DAC_READ_SEARCH, SETUID, SETGID]
+            readOnlyRootFilesystem: true
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                - |
+                  cd /
+                  test -d /export || { echo "ERROR: site data path is not mounted"; exit 1; }
+                  setpriv --reuid={{ .Values.exportUid | int64 }} --regid={{ .Values.exportGid | int64 }} --clear-groups -- \
+                    sh -c 'test -r /export && test -x /export && find /export -mindepth 1 -maxdepth 1 -print -quit >/dev/null' \
+                    || { echo "ERROR: site data path is not readable/listable by {{ .Values.exportUid | int64 }}:{{ .Values.exportGid | int64 }}"; exit 1; }
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: nfs
+            periodSeconds: 20
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+          volumeMounts:
+            - name: site-data
+              mountPath: /export
+              readOnly: true
+            - name: ganesha-run
+              mountPath: /run/ganesha
+            - name: ganesha-state
+              mountPath: /var/lib/ganesha
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: site-data
+          hostPath:
+            path: {{ .Values.dataPath | quote }}
+            type: ""
+        - name: ganesha-run
+          emptyDir: {}
+        - name: ganesha-state
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+{{- end }}
