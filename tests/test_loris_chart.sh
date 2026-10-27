@@ -241,7 +241,7 @@ assert_resources 'each import-enabled site gets an independently scheduled disco
 
 assert_resources 'runtime profiles preserve dataset null and false overrides and include required helpers' '
     [.[] | select(.kind == "ConfigMap" and .metadata.name == "loris-bids-nandou-profile")][0].data |
-    has("bids_runtime.py") and has("bids_ephys.py") and has("bids-view.py") and has("bids-setup.py") and has("bids_migrate.py") and
+    has("bids_runtime.py") and has("bids_ephys.py") and has("bids-view.py") and has("bids-setup.py") and has("bids_migrate.py") and has("bids_clone_migrate.py") and
     (.["runtime.json"] | fromjson |
         .site.name == "nandou" and .site.siteAlias == "NAND" and
         .bidsImport.defaults.project == "Shared" and

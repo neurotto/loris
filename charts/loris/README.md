@@ -8,7 +8,7 @@ This chart packages a **development deployment**, not a production-certified
 LORIS installation. It uses a custom image containing LORIS and LORIS-MRI
 **29.0.0**, an automated installer, and viewer, Module Manager and on-demand
 site content patches.
-Chart version: **0.3.0**.
+Chart version: **0.3.1**.
 
 > **Important:** The chart is disabled by default (`enabled: false`). Enabling it
 > without configuring persistence uses ephemeral storage for the database,
@@ -335,6 +335,48 @@ how long content stays; the portal Pod needs network access to it.
 | `siteClones.subPath`  | `re-move/clones` | Clone directory on the LORIS data PVC.                            |
 | `siteClones.cacheURL` | `""`             | `http(s)://host[:port]` of the content cache; empty disables it.   |
 
+#### Moving an imported NFS site to a clone source
+
+LORIS registrations point at files in the site's import view
+(`assembly_bids/import-<...>`), and the view links point at the mounted
+dataset. After switching a site from `source: nfs` to `source: clone`, annexed
+files resolve to `.git/annex/objects/...` in the clone instead of plain dataset
+paths. The importer then refuses the view with "removed or changed source files
+need review". `bids_clone_migrate.py`, shipped in the runtime profile ConfigMap,
+relinks an existing view without changing the database or site data:
+
+```bash
+# While the NFS mount is still present, record every view link and its hashes.
+python3 /import-profile/bids_clone_migrate.py prepare \
+  --view /data/loris/data/assembly_bids/import-<view> \
+  --source /data/loris/data/assembly_bids/<site>/<dataset> \
+  --journal /data/loris/data/clone-migration-<site>.json
+
+# After switching to clone source and checking out the clone, verify first.
+python3 /import-profile/bids_clone_migrate.py apply \
+  --journal /data/loris/data/clone-migration-<site>.json
+
+# Relink only after reviewing a clean verification report.
+python3 /import-profile/bids_clone_migrate.py apply \
+  --journal /data/loris/data/clone-migration-<site>.json \
+  --write --clone /data/loris/re-move/clones/<site>/<dataset>
+
+# To undo, restore the NFS mount before restoring the original links.
+python3 /import-profile/bids_clone_migrate.py rollback \
+  --journal /data/loris/data/clone-migration-<site>.json --write
+```
+
+`prepare` writes a mode-0600 journal and refuses to overwrite an existing one.
+`apply` verifies each target against the recorded size and hashes. Annexed files
+are verified against their git-annex key without fetching their content; other
+files are hashed. Missing, changed, or unverifiable files stop the operation
+before any links are changed. `--write` atomically replaces links and records
+the new targets, so interrupted runs can be resumed. With `--clone`, it also
+sets `refs/re-move/imported` under the dataset lock only if every annexed file
+in the clone has been verified. This lets the sync job stage later additions
+without re-staging the existing dataset. The next discovery re-arms the dataset
+because its fingerprint changed; registered files are skipped by the importer.
+
 ## Scheduled BIDS discovery and import
 
 Imports are opt-in at **both** `bidsImport.enabled` and
@@ -649,7 +691,7 @@ Tests live in the repository's `tests/` directory:
 
 | Command                                              | Needs                                                  | Covers                                          |
 | ---------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------- |
-| `python3 -m pytest tests --ignore tests/test_loris_bids_setup.py` | Python 3.12+, `sqlalchemy>=2`, `pytest`  | Discovery ledger, fingerprints, import views.   |
+| `python3 -m pytest tests --ignore tests/test_loris_bids_setup.py` | Python 3.12+, `sqlalchemy>=2`, `pytest`, `git-annex` | Discovery ledger, fingerprints, import views, NFS-to-clone view migration. |
 | `bash tests/test_loris_chart.sh`                     | `helm`, jq-compatible `yq` (Debian package `yq`)        | Rendered resources and values validation.       |
 | `bash tests/test_loris_bids_integration.sh`          | Docker, the `scilus/loris:29.0.0` and `mariadb:10.11.10` images | All `test_loris_bids_*` suites, including real LORIS-MRI imports, in the image. |
 | `node tests/test_loris_brainbrowser.js`              | Node.js, Docker                                        | BrainBrowser React mount and on-demand content retry patches. |

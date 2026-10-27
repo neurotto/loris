@@ -2,5 +2,5 @@ apiVersion: v2
 name: loris
 description: Central LORIS development portal and optional read-only BIDS site mounts (NFS or git-annex clones)
 type: application
-version: 0.3.0
+version: 0.3.1
 appVersion: 29.0.0
