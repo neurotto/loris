@@ -59,6 +59,16 @@ RUN git -C /var/www/loris apply --check /tmp/brainbrowser-react-mount.patch \
     && node --check /var/www/loris/modules/brainbrowser/js/brainbrowser.loris.js \
     && rm /tmp/brainbrowser-react-mount.patch
 
+# On-demand content of clone-sourced sites (RE_MOVE_CACHE_URL): 503 Retry-After instead of 404, BrainBrowser retry.
+COPY --chmod=0444 re-move-annex-content.patch /tmp/re-move-annex-content.patch
+RUN git -C /var/www/loris apply --check /tmp/re-move-annex-content.patch \
+    && git -C /var/www/loris apply /tmp/re-move-annex-content.patch \
+    && php -l /var/www/loris/src/ReMove/AnnexContent.php \
+    && php -l /var/www/loris/modules/api/php/endpoints/candidate/visit/image/image.class.inc \
+    && php -l /var/www/loris/modules/brainbrowser/php/imageinfo.class.inc \
+    && node --check /var/www/loris/modules/brainbrowser/js/brainbrowser.loris.js \
+    && rm /tmp/re-move-annex-content.patch
+
 RUN docker-php-ext-install gettext \
     && sed -i 's@DocumentRoot /var/www/html@DocumentRoot /var/www/loris/htdocs@' /etc/apache2/sites-available/000-default.conf
 

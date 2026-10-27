@@ -6,8 +6,9 @@ dataset mounts.
 
 This chart packages a **development deployment**, not a production-certified
 LORIS installation. It uses a custom image containing LORIS and LORIS-MRI
-**29.0.0**, an automated installer, and viewer and Module Manager patches.
-Chart version: **0.1.0**.
+**29.0.0**, an automated installer, and viewer, Module Manager and on-demand
+site content patches.
+Chart version: **0.3.0**.
 
 > **Important:** The chart is disabled by default (`enabled: false`). Enabling it
 > without configuring persistence uses ephemeral storage for the database,
@@ -300,6 +301,39 @@ For clone sources:
   (new subjects, sessions or files) are added to the existing import view and
   imported; files already registered are skipped without reading them. Removed or
   changed files that LORIS already registered stop the attempt with a review error.
+
+#### On-demand imaging content
+
+Images of clone-sourced sites stay at the site. Set `siteClones.cacheURL` to the
+base URL of a content cache service (the RE-MOVE `re-move-cache`, for example
+`http://re-move-cache.re-move-central.svc.cluster.local:8080`) to fetch them when
+they are viewed. The portal then receives `RE_MOVE_CACHE_URL` and
+`RE_MOVE_CLONE_ROOT=/data/loris/data/assembly_bids`, and the image patch
+(`image/re-move-annex-content.patch`) changes three endpoints:
+
+- the API image endpoint (`/api/v0.0.3/candidates/<id>/<visit>/images/<file>`) and
+  BrainBrowser's `imageinfo` follow the file's symlinks. When the target is a
+  git-annex object of a clone below `RE_MOVE_CLONE_ROOT` and its content is absent,
+  they `POST /content` `{site, dataset, key}` to the cache and answer
+  **HTTP 503** with a `Retry-After` header and a JSON body
+  `{error, state, retryAfter}` instead of 404. `state` is `fetching` (try again) or
+  `unavailable` (for example, the site is offline or has no copy);
+- serving present content sends a best-effort access notice (1 s timeout) so the
+  cache keeps recently viewed content longer;
+- BrainBrowser shows the cache message with the elapsed time and retries after
+  `Retry-After` while the state is `fetching`, then loads the volumes; other errors
+  are shown in place of the viewer.
+
+The site, dataset and key are derived from the symlink targets, never from the
+request. Files that are not annexed in a site clone, and portals without
+`cacheURL` (the default), behave as before. Thumbnails are generated at import and
+kept, so session pages do not need the content. The cache, not the chart, decides
+how long content stays; the portal Pod needs network access to it.
+
+| Value                   | Default          | Description                                                       |
+| ----------------------- | ---------------- | ----------------------------------------------------------------- |
+| `siteClones.subPath`  | `re-move/clones` | Clone directory on the LORIS data PVC.                            |
+| `siteClones.cacheURL` | `""`             | `http(s)://host[:port]` of the content cache; empty disables it.   |
 
 ## Scheduled BIDS discovery and import
 
@@ -618,7 +652,8 @@ Tests live in the repository's `tests/` directory:
 | `python3 -m pytest tests --ignore tests/test_loris_bids_setup.py` | Python 3.12+, `sqlalchemy>=2`, `pytest`  | Discovery ledger, fingerprints, import views.   |
 | `bash tests/test_loris_chart.sh`                     | `helm`, jq-compatible `yq` (Debian package `yq`)        | Rendered resources and values validation.       |
 | `bash tests/test_loris_bids_integration.sh`          | Docker, the `scilus/loris:29.0.0` and `mariadb:10.11.10` images | All `test_loris_bids_*` suites, including real LORIS-MRI imports, in the image. |
-| `node tests/test_loris_brainbrowser.js`              | Node.js                                                | BrainBrowser React mount patch.                 |
+| `node tests/test_loris_brainbrowser.js`              | Node.js, Docker                                        | BrainBrowser React mount and on-demand content retry patches. |
+| `bash tests/test_loris_annex_content.sh`             | Docker, an image built with `re-move-annex-content.patch` | On-demand content lookup, cache requests and 503 responses.   |
 | `bash tests/test_loris_diagnostics.sh`, `bash tests/test_loris_module_manager.sh` | A running local portal (`run-local.sh`) | Diagnostics and Module Manager guards.          |
 
 ## Upstream documentation

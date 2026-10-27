@@ -85,6 +85,9 @@
 {{- if or (has ".." (splitList "/" $clones)) (has "." (splitList "/" $clones)) (eq (index (splitList "/" $clones) 0) "data") -}}
 {{- fail "siteClones.subPath must not contain . or .. and must stay outside the LORIS data directory" -}}
 {{- end -}}
+{{- with .Values.siteClones.cacheURL -}}
+{{- if not (regexMatch "^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$" (toString .)) }}{{ fail "siteClones.cacheURL must be an http(s) base URL without a path" }}{{ end -}}
+{{- end -}}
 {{- range $field := list "activeDeadlineSeconds" "ttlSecondsAfterFinished" -}}
 {{- if not (regexMatch "^[1-9][0-9]*$" (toString (get $common $field))) }}{{ fail (printf "bidsImport.%s must be positive" $field) }}{{ end -}}
 {{- end -}}

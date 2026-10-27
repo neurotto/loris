@@ -1,0 +1,308 @@
+diff --git a/modules/api/php/endpoints/candidate/visit/image/image.class.inc b/modules/api/php/endpoints/candidate/visit/image/image.class.inc
+index bb14a0b..b54a175 100644
+--- a/modules/api/php/endpoints/candidate/visit/image/image.class.inc
++++ b/modules/api/php/endpoints/candidate/visit/image/image.class.inc
+@@ -172,6 +172,11 @@ class Image extends Endpoint implements \LORIS\Middleware\ETagCalculator
+ 
+         $info = $image->getFileInfo();
+ 
++        $pending = \LORIS\ReMove\AnnexContent::check($info->getPathname());
++        if ($pending !== null) {
++            return \LORIS\ReMove\AnnexContent::response($pending);
++        }
++
+         if (!$info->isFile()) {
+             error_log(
+                 'file '
+@@ -223,6 +228,10 @@ class Image extends Endpoint implements \LORIS\Middleware\ETagCalculator
+         }
+ 
+         $info = $image->getFileInfo();
++        if (!$info->isFile()) {
++            // Content not present (fetched on demand): no ETag, no 304.
++            return '';
++        }
+ 
+         $signature = [
+             'filename' => $this->_filename,
+diff --git a/modules/brainbrowser/js/brainbrowser.loris.js b/modules/brainbrowser/js/brainbrowser.loris.js
+index 345898c..583605a 100644
+--- a/modules/brainbrowser/js/brainbrowser.loris.js
++++ b/modules/brainbrowser/js/brainbrowser.loris.js
+@@ -809,11 +809,31 @@ function initializeBrainBrowser() {
+ 
+     viewer.setDefaultPanelSize(panelSize, panelSize);
+ 
+-    fetch(
+-      'imageinfo?fileids=' + mincIDs + '&fileurls=' + fileUrls,
+-      {credentials: 'same-origin', method: 'GET'}
+-    )
+-      .then((resp) => resp.json())
++    // RE-MOVE: images kept at their site answer 503 while central fetches
++    // them; retry until they are present or reported unavailable.
++    const imageInfoStarted = Date.now();
++    const fetchImageInfo = function() {
++      return fetch(
++        'imageinfo?fileids=' + mincIDs + '&fileurls=' + fileUrls,
++        {credentials: 'same-origin', method: 'GET'}
++      ).then((resp) => {
++        if (resp.status !== 503) {
++          return resp.json();
++        }
++        return resp.json().then((body) => {
++          if (body.state !== 'fetching') {
++            throw new Error(body.error || 'The images are unavailable.');
++          }
++          const seconds = Math.round((Date.now() - imageInfoStarted) / 1000);
++          loadingDiv.text(body.error + ' (' + seconds + ' s)');
++          const retry = Number(resp.headers.get('Retry-After')) || 5;
++          return new Promise((resolve) => setTimeout(resolve, retry * 1000))
++            .then(fetchImageInfo);
++        });
++      });
++    };
++
++    fetchImageInfo()
+       .then((data) => {
+         for (const file of data) {
+           let volume = {
+@@ -849,6 +869,9 @@ function initializeBrainBrowser() {
+             viewer.loadVolumes(bboptions); // load the volumes
+           }
+         );
++      })
++      .catch((error) => {
++        loadingDiv.text(error.message);
+       });
+ 
+     return viewer;
+diff --git a/modules/brainbrowser/php/imageinfo.class.inc b/modules/brainbrowser/php/imageinfo.class.inc
+index b3fbaaf..7473896 100644
+--- a/modules/brainbrowser/php/imageinfo.class.inc
++++ b/modules/brainbrowser/php/imageinfo.class.inc
+@@ -59,6 +59,11 @@ class ImageInfo extends \NDB_Page
+             }
+ 
+             $response = $this->_generateResults($dbfiles);
++
++            $pending = $this->_pendingContent($dbfiles);
++            if ($pending !== null) {
++                return \LORIS\ReMove\AnnexContent::response($pending);
++            }
+         }
+ 
+         if (count($fileurls) > 0) {
+@@ -238,6 +243,33 @@ class ImageInfo extends \NDB_Page
+         return join(" UNION ", $queries);
+     }
+ 
++    /**
++     * Ask for the content of every imaging browser file that is fetched on
++     * demand from its site (RE-MOVE), so one viewer request fetches them all.
++     *
++     * @param iterable $dbfiles The results of the database query
++     *
++     * @return ?array null when every file can be served, else the status of
++     *                an unavailable file, or else of a file being fetched
++     */
++    private function _pendingContent(iterable $dbfiles) : ?array
++    {
++        $imagepath = \NDB_Factory::singleton()->config()->getSetting('imagePath');
++        $pending   = null;
++        foreach ($dbfiles as $row) {
++            if ($row['Source'] !== 'ImagingBrowser') {
++                continue;
++            }
++            $status = \LORIS\ReMove\AnnexContent::check($imagepath . $row['File']);
++            if ($status !== null
++                && ($pending === null || $status['state'] === 'unavailable')
++            ) {
++                $pending = $status;
++            }
++        }
++        return $pending;
++    }
++
+     /**
+      * Formulate the database results into an appropriate JSON format
+      * and return the response.
+diff --git a/src/ReMove/AnnexContent.php b/src/ReMove/AnnexContent.php
+new file mode 100644
+index 0000000..e012483
+--- /dev/null
++++ b/src/ReMove/AnnexContent.php
+@@ -0,0 +1,174 @@
++<?php declare(strict_types=1);
++
++namespace LORIS\ReMove;
++
++use \Psr\Http\Message\ResponseInterface;
++
++/**
++ * Imaging content of clone-sourced RE-MOVE sites stays at the site. LORIS files
++ * link to git-annex objects of a central clone whose content is fetched on
++ * demand by the re-move-cache service (RE_MOVE_CACHE_URL) and dropped again
++ * after a short time.
++ *
++ * Without RE_MOVE_CACHE_URL, or for files that are not annexed in a site
++ * clone, nothing changes.
++ *
++ * @license http://www.gnu.org/licenses/gpl-3.0.txt GPLv3
++ */
++class AnnexContent
++{
++    private const KEY  = '[A-Z0-9]+(?:-[a-zA-Z][0-9]+)*--[A-Za-z0-9._,+=-]+';
++    private const NAME = '[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}';
++
++    /**
++     * Follow the symlinks of a LORIS file to a git-annex object of a site clone
++     * below RE_MOVE_CLONE_ROOT, whether or not its content is present.
++     *
++     * @param string $path Absolute path of the file LORIS serves
++     *
++     * @return ?array ['site' => ..., 'dataset' => ..., 'key' => ...] or null
++     */
++    public static function locate(string $path): ?array
++    {
++        $root = rtrim(
++            getenv('RE_MOVE_CLONE_ROOT') ?: '/data/loris/data/assembly_bids',
++            '/'
++        );
++        for ($hop = 0; $hop < 16 && is_link($path); $hop++) {
++            $target = readlink($path);
++            if ($target === false) {
++                return null;
++            }
++            $path = self::_normalize(
++                str_starts_with($target, '/') ? $target
++                    : dirname($path) . '/' . $target
++            );
++        }
++        $pattern = '#^' . preg_quote($root, '#') . '/(' . self::NAME . ')/('
++            . self::NAME . ')/\.git/annex/objects/(?:[^/]+/){1,2}('
++            . self::KEY . ')/\3$#';
++        if (preg_match($pattern, $path, $match) !== 1) {
++            return null;
++        }
++        return ['site' => $match[1], 'dataset' => $match[2], 'key' => $match[3]];
++    }
++
++    /**
++     * Make sure a file's content is present, asking the cache to fetch it.
++     *
++     * @param string $path Absolute path of the file LORIS serves
++     *
++     * @return ?array null when LORIS can serve the file (present, or not
++     *                managed here), else the cache status: state (fetching or
++     *                unavailable), message and retryAfter
++     */
++    public static function check(string $path): ?array
++    {
++        $url = getenv('RE_MOVE_CACHE_URL');
++        if (!$url) {
++            return null;
++        }
++        $content = self::locate($path);
++        if ($content === null) {
++            return null;
++        }
++        if (is_file($path)) {
++            // Present: record the access for the cache expiry, best effort.
++            self::_request($url, $content, 1);
++            return null;
++        }
++        $status = self::_request($url, $content, 10);
++        if ($status === null) {
++            return [
++                'state'      => 'unavailable',
++                'message'    => 'The image cache service is unreachable.',
++                'retryAfter' => 60,
++            ];
++        }
++        if ($status['state'] === 'present') {
++            return null;
++        }
++        return [
++            'state'      => $status['state'],
++            'message'    => (string)($status['message'] ?? ''),
++            'retryAfter' => (int)($status['retryAfter'] ?? 5),
++        ];
++    }
++
++    /**
++     * The 503 response for content that is not available yet.
++     *
++     * @param array $status A status returned by check()
++     *
++     * @return ResponseInterface
++     */
++    public static function response(array $status): ResponseInterface
++    {
++        return (new \LORIS\Http\Response\JsonResponse(
++            [
++                'error'      => $status['message'],
++                'state'      => $status['state'],
++                'retryAfter' => $status['retryAfter'],
++            ],
++            503
++        ))->withHeader('Retry-After', (string)$status['retryAfter']);
++    }
++
++    /**
++     * POST a content request to the cache service.
++     *
++     * @param string $url     Base URL of the service
++     * @param array  $content Site, dataset and key
++     * @param int    $timeout Seconds
++     *
++     * @return ?array The decoded status, or null on error
++     */
++    private static function _request(string $url, array $content, int $timeout)
++        : ?array
++    {
++        $curl = curl_init(rtrim($url, '/') . '/content');
++        curl_setopt_array(
++            $curl,
++            [
++                CURLOPT_POST           => true,
++                CURLOPT_POSTFIELDS     => json_encode($content),
++                CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
++                CURLOPT_RETURNTRANSFER => true,
++                CURLOPT_CONNECTTIMEOUT => min($timeout, 2),
++                CURLOPT_TIMEOUT        => $timeout,
++            ]
++        );
++        $body = curl_exec($curl);
++        $code = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
++        $status = is_string($body) && $code === 200
++            ? json_decode($body, true) : null;
++        if (!is_array($status) || !is_string($status['state'] ?? null)) {
++            error_log("re-move-cache request failed: HTTP $code");
++            return null;
++        }
++        return $status;
++    }
++
++    /**
++     * Resolve "." and ".." lexically (the target may not exist).
++     *
++     * @param string $path An absolute path
++     *
++     * @return string
++     */
++    private static function _normalize(string $path): string
++    {
++        $parts = [];
++        foreach (explode('/', $path) as $part) {
++            if ($part === '' || $part === '.') {
++                continue;
++            }
++            if ($part === '..') {
++                array_pop($parts);
++                continue;
++            }
++            $parts[] = $part;
++        }
++        return '/' . implode('/', $parts);
++    }
++}

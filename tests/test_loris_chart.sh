@@ -324,6 +324,23 @@ for invalid in \
 done
 printf 'PASS: unknown sources, NFS sites without server, ephemeral clone data and unsafe clone paths are rejected\n'
 
+loris_env='[.[] | select(.kind == "Deployment" and .metadata.name == "loris") | .spec.template.spec.containers[] |
+    select(.name == "loris") | .env | map({(.name): .value}) | add]'
+assert_resources 'without siteClones.cacheURL the portal does not ask for site content' "$loris_env |
+    length == 1 and (.[0] | has(\"RE_MOVE_CACHE_URL\") | not)"
+rendered=$(render_chart "$(printf '%s' "$clone_values" | yq -c '.siteClones.cacheURL = "http://re-move-cache.re-move-central.svc:8080"')")
+assert_resources 'siteClones.cacheURL enables on-demand site content in the portal' "$loris_env |
+    length == 1 and .[0].RE_MOVE_CACHE_URL == \"http://re-move-cache.re-move-central.svc:8080\" and
+    .[0].RE_MOVE_CLONE_ROOT == \"/data/loris/data/assembly_bids\""
+for invalid in '"ftp://cache"' '"http://cache/content"' '"http://cache:80 x"'; do
+    if render_chart "{\"enabled\": true, \"siteClones\": {\"cacheURL\": $invalid}}" >/dev/null 2>&1; then
+        printf 'FAIL: invalid siteClones.cacheURL %s must not render\n' "$invalid" >&2
+        exit 1
+    fi
+done
+tests_passed=$((tests_passed + 1))
+printf 'PASS: invalid siteClones.cacheURL values are rejected\n'
+
 rendered=$(render_chart '{"enabled": true}')
 assert_resources 'required LORIS modules are enforced by an unprivileged init container and guarded in the portal' '
     [.[] | select(.kind == "Deployment" and .metadata.name == "loris") | .spec.template.spec] |

@@ -93,6 +93,10 @@ sites: []
 # Clone-sourced sites (sites[].source: clone) live below this directory of the LORIS data PVC.
 siteClones:
   subPath: re-move/clones
+  # URL of the RE-MOVE content cache (re-move-cache). When set, images of clone-sourced sites whose
+  # git-annex content is not present are fetched on demand: the API and BrainBrowser answer
+  # 503 + Retry-After while the cache fetches them from the site, instead of 404. Empty disables it.
+  cacheURL: ""
 
 bidsImport:
   enabled: false
