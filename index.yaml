@@ -3,6 +3,17 @@ entries:
   loris:
   - apiVersion: v2
     appVersion: 29.0.0
+    created: "2026-10-27T19:19:49.556937377Z"
+    description: Central LORIS development portal and optional read-only BIDS site
+      mounts (NFS or git-annex clones)
+    digest: 8192ca86acfb822a707752a9f4e8d637d7d7cb0e07b1524bef9f05cc7278bc36
+    name: loris
+    type: application
+    urls:
+    - https://github.com/neurotto/loris/releases/download/loris-0.3.1/loris-0.3.1.tgz
+    version: 0.3.1
+  - apiVersion: v2
+    appVersion: 29.0.0
     created: "2026-10-27T13:14:12.398885558Z"
     description: Central LORIS development portal and optional read-only BIDS site
       mounts (NFS or git-annex clones)
@@ -44,4 +55,4 @@ entries:
     urls:
     - https://github.com/neurotto/loris/releases/download/loris-nfs-export-0.1.0/loris-nfs-export-0.1.0.tgz
     version: 0.1.0
-generated: "2026-10-27T13:14:12.398903151Z"
+generated: "2026-10-27T19:19:49.556962674Z"
