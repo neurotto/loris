@@ -4,6 +4,8 @@ Argo manages per-site discovery CronJobs; discovery creates immutable worker
 attempts at runtime. MariaDB, not Kubernetes Job history, records completion.
 Dataset identity is the site/folder pair, while the registered import-view path
 stays stable across attempts so upstream can recognize already registered files.
+Sites with source: clone read a versioned central git-annex clone: fingerprints use
+annex keys instead of content, and additive dataset updates are imported again.
 
 The CLI consumes a generated runtime.json containing namespace, cronJob, site,
 and common bidsImport settings. Database credentials come from the LORIS config.py
@@ -200,13 +202,15 @@ def read_name(source):
 def source_fingerprint(source):
     """Hash relative file paths and contents to detect published dataset changes.
 
-    Root-level derivatives are excluded. File symlinks must resolve within the
-    dataset; directory symlinks and non-regular files are rejected. The entire
-    included dataset is read, so this check can be expensive on large exports.
+    Root-level derivatives and .git are excluded. File symlinks must resolve within
+    the dataset; directory symlinks and non-regular files are rejected. Locked
+    git-annex files hash their annex key (already a content hash), so dropped
+    content is not needed. Other files are read in full, which can be expensive.
     """
     if not source.is_dir():
         raise ValueError('Dataset source does not exist')
 
+    view = helper('bids-view')
     digest = hashlib.sha256()
 
     def unreadable(error):
@@ -216,14 +220,23 @@ def source_fingerprint(source):
     for current, directories, files in os.walk(source, followlinks=False, onerror=unreadable):
         current = Path(current)
         if current == source:
-            directories[:] = [name for name in directories if name != 'derivatives']
+            directories[:] = [name for name in directories if name not in view.SKIPPED_ROOT_DIRECTORIES]
 
         for name in directories:
             if (current / name).is_symlink():
                 raise ValueError('Source contains a symlinked directory')
 
         for name in sorted(files):
+            if current == source and name == '.git':
+                continue
+
             path = current / name
+            annexed = view.annex_object(source, path)
+            if annexed is not None:
+                digest.update(encoded(str(path.relative_to(source))).encode())
+                digest.update(hashlib.sha256(b'git-annex-key\0' + annexed.name.encode()).digest())
+                continue
+
             resolved = path.resolve(strict=True)
             if not resolved.is_relative_to(source.resolve()):
                 raise ValueError('Source file escapes the dataset root')
@@ -306,11 +319,13 @@ def registration(settings):
     return {key: settings.get(key) for key in IDENTITY_KEYS}
 
 
-def enroll(engine, site, folder, settings, metadata_name, view_path=None, fingerprint=None):
+def enroll(engine, site, folder, settings, metadata_name, view_path=None, fingerprint=None, allow_update=False):
     """Register an immutable dataset definition and return its stable identity.
 
     Existing definitions must match registration settings, Name, and fingerprint;
-    a known Name under another folder is rejected as a possible rename. An
+    a known Name under another folder is rejected as a possible rename. With
+    allow_update (versioned clone sources), an idle dataset whose fingerprint
+    changed is re-armed: completed modes reset so the update is imported. An
     omitted fingerprint is computed from the site's source tree. view_path can
     preserve a verified legacy view; otherwise a deterministic path is assigned.
     Callers must hold the site's discovery lock to serialize enrollment.
@@ -324,7 +339,15 @@ def enroll(engine, site, folder, settings, metadata_name, view_path=None, finger
                 raise ValueError('Known dataset identity/configuration changed; review migration instead of reimporting')
 
             if row['fingerprint'] != fingerprint:
-                raise ValueError('Published dataset content changed; review migration instead of reimporting')
+                if not allow_update:
+                    raise ValueError('Published dataset content changed; review migration instead of reimporting')
+
+                if row['status'] in ('reserved', 'running'):
+                    raise ValueError('Dataset changed during an active attempt; it is retried after that attempt')
+
+                connection.execute(update(DATASETS).where(DATASETS.c.id == identity).values(
+                    fingerprint=fingerprint, completed_modes='[]', status='updated', updated_at=now(), error=None,
+                ))
 
             return identity
 
@@ -702,7 +725,8 @@ def discover(engine, config, api):
                 name = read_name(folder)
                 settings = resolve_settings(config, folder.name, name)
                 helper('bids-view').inspect_source(folder)
-                identity = enroll(engine, site['name'], folder.name, settings, name)
+                identity = enroll(engine, site['name'], folder.name, settings, name,
+                                  allow_update=site.get('source') == 'clone')
                 row = get_dataset(engine, identity)
                 if row['status'] in ('reserved', 'running'):
                     if not reconcile(engine, api, row, cron, profile):
@@ -862,7 +886,8 @@ def import_dataset(view, settings):
         path = get_loris_bids_file_path(import_env, session, bids_info.data_type, acquisition.nifti_path)
 
         existing = try_get_file_with_path(env.db, path)
-        if existing is not None:
+        # Clone sources keep only new content during updates; registered files may be dropped.
+        if existing is not None and acquisition.nifti_path.exists():
             # Upstream commits registration before preview generation, then skips the path on retry.
             create_nifti_preview_picture(env, existing)
 
@@ -954,7 +979,8 @@ def worker(engine, config, identity, attempt):
                     raise ValueError('Import view is outside the assembly directory')
 
                 helper('bids-view').prepare_view(source, view, settings['project'], row['site'],
-                                                settings['cohort'], reuse=True)
+                                                settings['cohort'], reuse=True,
+                                                extend=site.get('source') == 'clone')
                 outcome.update(import_dataset(view, settings))
 
             record(engine, identity, attempt, 'succeeded')

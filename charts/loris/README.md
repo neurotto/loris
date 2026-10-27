@@ -21,7 +21,8 @@ Chart version: **0.1.0**.
   configuration setup.
 - Configurable persistent storage or existing claims for all writable state.
 - Optional ingress at the root of a dedicated hostname.
-- Optional read-only NFSv4.1 site mounts for BIDS datasets.
+- Optional read-only BIDS site mounts: NFSv4.1 exports, or central git-annex
+  clones kept on the LORIS data volume by an external sync job.
 - Optional scheduled dataset discovery and ledger-backed import Jobs using the
   LORIS-MRI `--no-copy` importer.
 - A database ingress NetworkPolicy and Argo CD sync-wave annotations.
@@ -219,10 +220,15 @@ existing deployment to another URL.
 
 ## Read-only BIDS site mounts
 
-Site storage is optional (`sites: []`). This chart creates the central PV/PVC
-and mounts; it does **not** deploy an NFS server or configure a site's firewall.
+Site storage is optional (`sites: []`). Each enabled site is mounted read-only in
+the portal and import Pods at the same path, whatever its `source`:
 
-Each enabled site mounts an existing NFSv4.1 export at:
+- `source: nfs` (default): an existing NFSv4.1 export. The chart creates the PV/PVC;
+  it does **not** deploy an NFS server or configure a site's firewall.
+- `source: clone`: a central git-annex (DataLad) clone directory on the LORIS data
+  volume. See [Clone-sourced sites](#clone-sourced-sites).
+
+Each enabled site is mounted at:
 
 ```text
 /data/loris/data/assembly_bids/<site-name>
@@ -246,8 +252,9 @@ sites:
 | Site field     | Default                            | Description                                                                                               |
 | -------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `name`       | Required                           | Unique lowercase DNS label, at most 40 characters; also used for the LORIS site name and mount directory. |
-| `enabled`    | Set explicitly                     | Create the site PV/PVC and mount it in the portal.                                                        |
-| `server`     | Required for enabled sites         | NFS server address reachable from eligible cluster nodes.                                                 |
+| `enabled`    | Set explicitly                     | Mount the site in the portal (and create its PV/PVC for NFS sources).                                     |
+| `source`     | `nfs`                              | `nfs` or `clone`.                                                                                         |
+| `server`     | Required for enabled NFS sites     | NFS server address reachable from eligible cluster nodes.                                                 |
 | `nfsPort`    | `20490`                          | NFS TCP port.                                                                                             |
 | `capacity`   | `1Ti`                            | Declared PV/PVC capacity, not an enforced NFS quota.                                                      |
 | `siteAlias`  | Required for imports               | Unique 1–4 character LORIS site alias.                                                                   |
@@ -266,6 +273,33 @@ per-site authentication. Only export approved, appropriately de-identified data.
 
 Mounting a dataset does not register it in LORIS. Read-only site storage must not
 be used for writable upload staging, temporary files, or pipeline outputs.
+
+### Clone-sourced sites
+
+With `source: clone`, the site directory is
+`<siteClones.subPath>/<site-name>` on the LORIS data PVC (default
+`re-move/clones/<site-name>`), outside the LORIS `data/` tree. It is mounted
+read-only (a `subPath` of the data volume) at the usual site path, so no PV, NFS
+client or site network access is needed and imports keep their read-only check.
+Clone sources require `loris.data.persistence.enabled`.
+
+The chart only prepares the directory: the portal init container creates it, owned
+by `www-data` (UID 33). An external job, such as the RE-MOVE sync job, keeps one
+git-annex clone per dataset in it (`<site>/<dataset>/`, with locked annexed files)
+and must write as UID 33. Annexed content may be absent: dataset metadata
+(`dataset_description.json`, `participants.tsv`, sidecars) must stay present, and
+imaging content only needs to be present while it is imported or viewed.
+
+For clone sources:
+
+- fingerprints hash git-annex keys (already content hashes) instead of reading
+  content, and skip `.git`, so discovery works with content dropped;
+- import views link annexed files to their annex object paths, which do not
+  depend on content presence;
+- a dataset whose fingerprint changed is re-armed and imported again. Additions
+  (new subjects, sessions or files) are added to the existing import view and
+  imported; files already registered are skipped without reading them. Removed or
+  changed files that LORIS already registered stop the attempt with a review error.
 
 ## Scheduled BIDS discovery and import
 
@@ -384,13 +418,14 @@ Kubernetes Job history. Imports use database locking to serialize shared-state
 changes; failed or deferred attempts can be retried on subsequent discovery.
 Already completed modes are skipped.
 
-Dataset identity is the site/folder pair. Changes to source fingerprints,
-dataset names, or registration identity are rejected rather than silently
-reimported; investigate and plan an explicit migration. Imports commit
-incrementally: a failed attempt does not roll back previously registered scans.
-Fingerprinting reads the included dataset contents, even during discovery;
-account for source size and network throughput when choosing the schedule and
-Job deadline.
+Dataset identity is the site/folder pair. Changes to dataset names or
+registration identity are rejected rather than silently reimported; investigate
+and plan an explicit migration. Changed NFS source fingerprints are rejected the
+same way; clone sources import additive updates instead (see
+[Clone-sourced sites](#clone-sourced-sites)). Imports commit incrementally: a
+failed attempt does not roll back previously registered scans. NFS fingerprinting
+reads the included dataset contents, even during discovery; account for source
+size and network throughput when choosing the schedule and Job deadline.
 
 | Scheduling value                       | Default         | Description                                               |
 | -------------------------------------- | --------------- | --------------------------------------------------------- |
@@ -432,6 +467,7 @@ values are listed below.
 | `loris.databaseUser`                | `loris`                                             | Application database username.                                                               |
 | `loris.adminUser`                   | `admin`                                             | Initial frontend administrator username.                                                     |
 | `loris.publicUrl`                   | `http://loris.local`                                | Absolute public URL used during bootstrap; use a dedicated hostname with no sub-path.        |
+| `siteClones.subPath`                | `re-move/clones`                                    | Relative LORIS data-PVC directory holding clone-sourced sites; must not start with `data`.   |
 | `loris.additionalRequiredModules`   | `[]`                                                | Additional module names to keep active.                                                      |
 | `loris.servicePort`                 | `80`                                                | ClusterIP Service port; container HTTP port remains 80.                                      |
 | `loris.replicas`                    | `1`                                                 | Portal replicas; one is recommended.                                                         |
@@ -572,6 +608,18 @@ tool setup and adequate host resources.
 See the [audit guide](https://github.com/neurotto/loris/tree/main/tools/security/loris)
 for prerequisites, diagrams, coverage limitations, report formats, and runtime
 safety. These repository tools are not included in the Helm chart package.
+
+## Tests
+
+Tests live in the repository's `tests/` directory:
+
+| Command                                              | Needs                                                  | Covers                                          |
+| ---------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------- |
+| `python3 -m pytest tests --ignore tests/test_loris_bids_setup.py` | Python 3.12+, `sqlalchemy>=2`, `pytest`  | Discovery ledger, fingerprints, import views.   |
+| `bash tests/test_loris_chart.sh`                     | `helm`, jq-compatible `yq` (Debian package `yq`)        | Rendered resources and values validation.       |
+| `bash tests/test_loris_bids_integration.sh`          | Docker, the `scilus/loris:29.0.0` and `mariadb:10.11.10` images | All `test_loris_bids_*` suites, including real LORIS-MRI imports, in the image. |
+| `node tests/test_loris_brainbrowser.js`              | Node.js                                                | BrainBrowser React mount patch.                 |
+| `bash tests/test_loris_diagnostics.sh`, `bash tests/test_loris_module_manager.sh` | A running local portal (`run-local.sh`) | Diagnostics and Module Manager guards.          |
 
 ## Upstream documentation
 

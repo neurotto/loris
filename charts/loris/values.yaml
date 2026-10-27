@@ -78,7 +78,21 @@ ingress:
             - path: /
               pathType: Prefix
 
+# Sites whose BIDS data LORIS reads, each mounted read-only at /data/loris/data/assembly_bids/<name>:
+#   - name: nandou            DNS label, LORIS site name
+#     siteAlias: NAND         1-4 characters, required when bidsImport is enabled for the site
+#     enabled: true
+#     source: nfs             nfs (default): NFS export at server:nfsPort/bids (templates/site-volumes.yaml)
+#     server: nfs.example.org
+#     nfsPort: 20490
+#     source: clone           clone: central git-annex clone at <siteClones.subPath>/<name> on the LORIS data PVC,
+#                             kept by an external sync job. Additive dataset updates are re-imported.
+#     bidsImport: {...}
 sites: []
+
+# Clone-sourced sites (sites[].source: clone) live below this directory of the LORIS data PVC.
+siteClones:
+  subPath: re-move/clones
 
 bidsImport:
   enabled: false

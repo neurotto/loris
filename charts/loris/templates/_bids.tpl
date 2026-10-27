@@ -43,6 +43,12 @@
 {{- fail "Site names must be unique DNS labels of at most 40 characters" -}}
 {{- end -}}
 {{- $_ := set $names .name true -}}
+{{- $source := include "loris.siteSource" . -}}
+{{- if not (has $source (list "nfs" "clone")) }}{{ fail "sites[].source must be nfs or clone" }}{{ end -}}
+{{- if and .enabled (eq $source "nfs") (empty .server) }}{{ fail (printf "NFS site %s requires server" .name) }}{{ end -}}
+{{- if and .enabled (eq $source "clone") (not $.Values.loris.data.persistence.enabled) -}}
+{{- fail "Clone-sourced sites require persistent LORIS data" -}}
+{{- end -}}
 {{- $import := .bidsImport | default dict -}}
 {{- range $key, $_ := $import -}}
 {{- if not (has $key (concat $fields (list "enabled" "schedule" "timeZone" "suspend" "datasets"))) -}}
@@ -73,6 +79,11 @@
 {{- range $settings := $all -}}
 {{- include "loris.bids.settings" $settings -}}
 {{- end -}}
+{{- end -}}
+{{- $clones := .Values.siteClones.subPath | default "" -}}
+{{- if not (regexMatch "^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$" $clones) }}{{ fail "siteClones.subPath must be a relative path" }}{{ end -}}
+{{- if or (has ".." (splitList "/" $clones)) (has "." (splitList "/" $clones)) (eq (index (splitList "/" $clones) 0) "data") -}}
+{{- fail "siteClones.subPath must not contain . or .. and must stay outside the LORIS data directory" -}}
 {{- end -}}
 {{- range $field := list "activeDeadlineSeconds" "ttlSecondsAfterFinished" -}}
 {{- if not (regexMatch "^[1-9][0-9]*$" (toString (get $common $field))) }}{{ fail (printf "bidsImport.%s must be positive" $field) }}{{ end -}}

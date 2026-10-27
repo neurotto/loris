@@ -183,9 +183,7 @@ spec:
                   readOnly: true
                 - name: loris-data
                   mountPath: /data/loris
-                - name: site-data
-                  mountPath: /data/loris/data/assembly_bids/{{ .name }}
-                  readOnly: true
+                {{- include "loris.siteMount" (list . $root "site-data") | indent 16 }}
           volumes:
             - name: profile
               configMap:
@@ -193,9 +191,7 @@ spec:
             - name: loris-data
               persistentVolumeClaim:
                 claimName: {{ $root.Values.loris.data.persistence.existingClaim | default "loris-data" | quote }}
-            - name: site-data
-              persistentVolumeClaim:
-                claimName: loris-bids-{{ .name }}
+            {{- include "loris.siteVolume" (list . "site-data") | indent 12 }}
 {{- end }}
 {{- end }}
 {{- end }}

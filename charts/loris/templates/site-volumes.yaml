@@ -1,6 +1,6 @@
 {{- if .Values.enabled }}
 {{- range .Values.sites }}
-{{- if .enabled }}
+{{- if and .enabled (ne (include "loris.siteSource" .) "clone") }}
 ---
 apiVersion: v1
 kind: PersistentVolume

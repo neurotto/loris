@@ -61,9 +61,7 @@ spec:
               mountPath: /data/loris
             {{- range .Values.sites }}
             {{- if .enabled }}
-            - name: site-{{ .name }}
-              mountPath: /data/loris/data/assembly_bids/{{ .name }}
-              readOnly: true
+            {{- include "loris.siteMount" (list . $ (printf "site-%s" .name)) | indent 12 }}
             {{- end }}
             {{- end }}
       volumes:
@@ -85,9 +83,7 @@ spec:
           {{- end }}
         {{- range .Values.sites }}
         {{- if .enabled }}
-        - name: site-{{ .name }}
-          persistentVolumeClaim:
-            claimName: loris-bids-{{ .name }}
+        {{- include "loris.siteVolume" (list . (printf "site-%s" .name)) | indent 8 }}
         {{- end }}
         {{- end }}
 ---
