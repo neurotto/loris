@@ -14,4 +14,5 @@ docker run --rm --network none --user 33:33 -v "$fixtures:/fixtures:ro" \
             sleep 0.5
         done
         php /fixtures/check.php
+        php /fixtures/imageinfo.php
     '

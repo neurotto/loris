@@ -80,9 +80,11 @@ diff --git a/modules/brainbrowser/php/imageinfo.class.inc b/modules/brainbrowser
 index b3fbaaf..7473896 100644
 --- a/modules/brainbrowser/php/imageinfo.class.inc
 +++ b/modules/brainbrowser/php/imageinfo.class.inc
-@@ -59,6 +59,11 @@ class ImageInfo extends \NDB_Page
+@@ -59,6 +59,13 @@ class ImageInfo extends \NDB_Page
              }
  
++            // The database cursor is single-pass; both consumers need the rows.
++            $dbfiles = iterator_to_array($dbfiles);
              $response = $this->_generateResults($dbfiles);
 +
 +            $pending = $this->_pendingContent($dbfiles);
@@ -92,7 +94,7 @@ index b3fbaaf..7473896 100644
          }
  
          if (count($fileurls) > 0) {
-@@ -238,6 +243,33 @@ class ImageInfo extends \NDB_Page
+@@ -238,6 +245,33 @@ class ImageInfo extends \NDB_Page
          return join(" UNION ", $queries);
      }
  

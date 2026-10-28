@@ -695,7 +695,7 @@ Tests live in the repository's `tests/` directory:
 | `bash tests/test_loris_chart.sh`                     | `helm`, jq-compatible `yq` (Debian package `yq`)        | Rendered resources and values validation.       |
 | `bash tests/test_loris_bids_integration.sh`          | Docker, the `scilus/loris:29.0.0` and `mariadb:10.11.10` images | All `test_loris_bids_*` suites, including real LORIS-MRI imports, in the image. |
 | `node tests/test_loris_brainbrowser.js`              | Node.js, Docker                                        | BrainBrowser React mount and on-demand content retry patches. |
-| `bash tests/test_loris_annex_content.sh`             | Docker, an image built with `re-move-annex-content.patch` | On-demand content lookup, cache requests and 503 responses.   |
+| `bash tests/test_loris_annex_content.sh`             | Docker, an image built with `re-move-annex-content.patch` | On-demand content lookup, cache requests, and cold/warm BrainBrowser metadata responses with a single-pass database cursor. |
 | `bash tests/test_loris_diagnostics.sh`, `bash tests/test_loris_module_manager.sh` | A running local portal (`run-local.sh`) | Diagnostics and Module Manager guards.          |
 
 ## Upstream documentation
