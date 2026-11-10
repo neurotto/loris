@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -149,6 +150,13 @@ class ImporterIntegrationTests(unittest.TestCase):
                 'WHERE f.FilePath LIKE :prefix ORDER BY f.FilePath'
             ), {'prefix': str(self.view.relative_to(runtime.ROOT)) + '/%'}).all()
 
+    def file_reader_lookup(self, chunks):
+        """Run the patched file_reader chunk lookup as LORIS pselectOne does (it appends LIMIT 2)."""
+        source = Path('/var/www/loris/modules/electrophysiology_browser/php/file_reader.class.inc').read_text()
+        query = re.search(r'pselectOne\(\s*"([^"]+)"', source).group(1)
+        with self.engine.connect() as connection:
+            return [tuple(row) for row in connection.execute(text(query + ' LIMIT 2'), {'chunks': chunks}).all()]
+
     def test_numeric_brainvision_mapping_keeps_header_references_on_retry(self):
         directory = self.brainvision()
         before = {path.name: path.read_bytes() for path in directory.iterdir()}
@@ -212,6 +220,8 @@ class ImporterIntegrationTests(unittest.TestCase):
                 'SELECT c.Name FROM parameter_type t JOIN parameter_type_category_rel r USING (ParameterTypeID) '
                 'JOIN parameter_type_category c USING (ParameterTypeCategoryID) '
                 "WHERE t.Name = 'electrophysiology_chunked_dataset_path'")), 'Electrophysiology Variables')
+        self.assertEqual(self.file_reader_lookup(chunks), [(header,)])
+        self.assertEqual(self.file_reader_lookup(chunks + 'x'), [(None,)])
         repair.repair(self.engine, self.view, runtime.ROOT, 1, apply=True)
         self.assertEqual([tuple(row) for row in self.physiological()], [(header, chunks)])
         self.assertEqual(runtime.import_dataset(self.view, self.settings)['errors'], 0)

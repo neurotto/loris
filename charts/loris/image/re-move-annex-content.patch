@@ -253,7 +253,7 @@ index dc3ff45..319c83e 100644
  
              $downloader = new \LORIS\FilesDownloadHandler(
                  new \SPLFileInfo($downloadpath)
-@@ -49,4 +53,57 @@ class File_Reader extends \NDB_Page
+@@ -49,4 +53,56 @@ class File_Reader extends \NDB_Page
              ));
          }
      }
@@ -289,13 +289,12 @@ index dc3ff45..319c83e 100644
 +            return null;
 +        }
 +        $filePath = \NDB_Factory::singleton()->database()->pselectOne(
-+            "SELECT pf.FilePath FROM physiological_file pf
++            "SELECT MIN(pf.FilePath) FROM physiological_file pf
 +               JOIN physiological_parameter_file ppf
 +                 USING (PhysiologicalFileID)
 +               JOIN parameter_type pt USING (ParameterTypeID)
 +             WHERE pt.Name = 'electrophysiology_chunked_dataset_path'
-+               AND ppf.Value = :chunks
-+             LIMIT 1",
++               AND ppf.Value = :chunks",
 +            ['chunks' => $match[1]]
 +        );
 +        if (!is_string($filePath)) {
