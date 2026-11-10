@@ -11,6 +11,10 @@
         touch /project-state/.loris-seeded
       fi
       mkdir -p /data-state/data/assembly_bids
+      {{- if .Values.siteClones.cacheURL }}
+      # EEG signal chunks the content cache prepares on first view.
+      mkdir -p /data-state/data/re-move-chunks
+      {{- end }}
       {{- range .Values.sites }}
       {{- if .enabled }}
       mkdir -p /data-state/data/assembly_bids/{{ .name }}

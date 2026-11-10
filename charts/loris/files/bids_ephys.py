@@ -5,6 +5,13 @@ then skips them on retry. Scoped hooks include those files again and reconcile
 their archives. A per-view artifact manifest records owned archive paths so
 recovery never treats arbitrary existing files as disposable importer outputs.
 Filesystem arguments are absolute pathlib.Path objects.
+
+RE-MOVE EEG viewing: a BrainVision recording is registered once, by its .vhdr
+header (upstream registers the .vhdr, .vmrk and .eeg as three recordings).
+Recordings of git-annex clone sources are not chunked at import; their
+electrophysiology_chunked_dataset_path names the directory the re-move-cache
+service prepares on first view (re-move-chunks/<site>/<dataset>/<key>/<stem>.chunks).
+Other recordings are not chunked.
 """
 
 from contextlib import contextmanager
@@ -12,9 +19,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 
 def hash_file(path):
@@ -59,6 +67,84 @@ def remember(view, path, checksum):
             os.unlink(temporary)
 
 
+CHUNKS_DIR = 're-move-chunks'
+CHUNKED_EXTENSIONS = ('.edf', '.set', '.vhdr', '.bdf')
+NAME_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}')
+KEY_RE = re.compile(r'[A-Z0-9]+(-[a-zA-Z][0-9]+)*--[A-Za-z0-9._,+=-]+')
+
+
+def brainvision_primary(files):
+    """Drop BrainVision .eeg/.vmrk files whose .vhdr header is also listed.
+
+    files are pybids BIDSFile-like objects with a path attribute. The header
+    names its data and marker files, so it alone stands for the recording.
+    """
+    headers = {Path(file.path).with_suffix('') for file in files if Path(file.path).suffix == '.vhdr'}
+    return [file for file in files
+            if Path(file.path).suffix not in ('.eeg', '.vmrk') or Path(file.path).with_suffix('') not in headers]
+
+
+class BrainVisionLayout:
+    """A BIDS layout whose EEG file queries list BrainVision recordings once."""
+
+    def __init__(self, layout):
+        self._layout = layout
+
+    def get(self, *args, **kwargs):
+        files = self._layout.get(*args, **kwargs)
+        extension = kwargs.get('extension')
+        if isinstance(extension, (list, tuple)) and 'vhdr' in extension:
+            return brainvision_primary(files)
+
+        return files
+
+    def __getattr__(self, name):
+        return getattr(self._layout, name)
+
+
+def lazy_chunk_path(data_dir, path):
+    """Return the on-demand chunk directory of a clone-sourced recording, else None.
+
+    path is the recording's data-root-relative FilePath. Its view link resolves
+    (lexically, as content may be dropped) to <data_dir>/assembly_bids/<site>/
+    <dataset>/.git/annex/objects/../<key>/<key>; the result is relative to
+    data_dir and matches what LORIS and re-move-cache derive from that link.
+    """
+    if path.suffix not in CHUNKED_EXTENSIONS:
+        return None
+
+    root = (data_dir / 'assembly_bids').resolve()
+    target = data_dir / path
+    for _ in range(8):
+        if not target.is_symlink():
+            break
+        target = Path(os.path.normpath(target.parent.resolve() / os.readlink(target)))
+
+    if not target.is_relative_to(root):
+        return None
+
+    parts = target.relative_to(root).parts
+    if (len(parts) < 7 or parts[2:5] != ('.git', 'annex', 'objects') or parts[-1] != parts[-2]
+            or not NAME_RE.fullmatch(parts[0]) or not NAME_RE.fullmatch(parts[1])
+            or not KEY_RE.fullmatch(parts[-1])):
+        return None
+
+    return Path(CHUNKS_DIR, parts[0], parts[1], parts[-1], path.stem + '.chunks')
+
+
+def has_chunk_parameter(db, file_id):
+    """Return whether a physiological file has a chunk path, matching it by name like LORIS.
+
+    Upstream try_get_physio_file_parameter_with_file_id_name looks the type up with source
+    'physiological_file' while insert_physio_file_parameter creates it with
+    'physiological_parameter_file', so it never finds what the importer recorded.
+    """
+    return db.execute(text(
+        'SELECT 1 FROM physiological_parameter_file ppf JOIN parameter_type pt USING (ParameterTypeID) '
+        "WHERE ppf.PhysiologicalFileID = :id AND pt.Name = 'electrophysiology_chunked_dataset_path' LIMIT 1"
+    ), {'id': file_id}).first() is not None
+
+
 @contextmanager
 def resumable_ephys(view):
     """Temporarily install EEG file-reuse and archive-reconciliation hooks.
@@ -83,18 +169,20 @@ def resumable_ephys(view):
     original_fetch = eeg.Eeg.fetch_and_insert_eeg_files
     original_file_archive = eeg.import_physio_file_archive
     original_event_archive = eeg.import_physio_event_archive
+    original_chunks = eeg.create_physio_channels_chunks
 
     def fetch(instance, derivatives=False, detect=True):
         """Include registered EEG files so upstream resumes their auxiliary work.
 
         Preserve upstream fetching for new files and append same-session existing
         files with their sidecar references rather than silently skipping them.
+        BrainVision recordings are fetched by their .vhdr header only.
         """
-        candidates = instance.bids_layout.get(
+        candidates = brainvision_primary(instance.bids_layout.get(
             subject=instance.bids_info.subject, session=instance.bids_info.session,
             suffix=instance.bids_info.data_type, extension=['set', 'edf', 'vhdr', 'vmrk', 'eeg', 'bdf'],
             **({'scope': 'derivatives' if derivatives else 'raw'} if detect else {}),
-        )
+        ))
 
         existing = []
         for candidate in candidates:
@@ -123,7 +211,35 @@ def resumable_ephys(view):
                 'original_file_data': candidate}
             )
 
-        return (original_fetch(instance, derivatives, detect) or []) + existing
+        layout = instance.bids_layout
+        instance.bids_layout = BrainVisionLayout(layout)
+        try:
+            fetched = original_fetch(instance, derivatives, detect) or []
+        finally:
+            instance.bids_layout = layout
+
+        return fetched + existing
+
+    def chunks(env, file):
+        """Register on-demand chunks for clone-sourced recordings.
+
+        Other recordings are not chunked: upstream chunking at import exits the
+        whole import on any unreadable recording.
+        """
+        from lib.config import get_data_dir_path_config
+        from lib.logging import log
+        from lib.physio.parameters import insert_physio_file_parameter
+
+        if has_chunk_parameter(env.db, file.id):
+            return
+
+        path = lazy_chunk_path(get_data_dir_path_config(env), Path(file.path))
+        if path is None:
+            log(env, f"No signal chunks for '{file.path}': only clone-sourced recordings are chunked.")
+            return
+
+        insert_physio_file_parameter(env, file, 'electrophysiology_chunked_dataset_path', path)
+        env.db.commit()
 
     def archive_checked(env, file, paths, event=False):
         """Verify or rebuild one owned file/event archive for a physiological file.
@@ -166,6 +282,7 @@ def resumable_ephys(view):
     eeg.Eeg.fetch_and_insert_eeg_files = fetch
     eeg.import_physio_file_archive = archive_checked
     eeg.import_physio_event_archive = lambda env, file, paths: archive_checked(env, file, paths, event=True)
+    eeg.create_physio_channels_chunks = chunks
 
     try:
         yield
@@ -173,3 +290,4 @@ def resumable_ephys(view):
         eeg.Eeg.fetch_and_insert_eeg_files = original_fetch
         eeg.import_physio_file_archive = original_file_archive
         eeg.import_physio_event_archive = original_event_archive
+        eeg.create_physio_channels_chunks = original_chunks

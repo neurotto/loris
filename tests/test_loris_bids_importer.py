@@ -105,35 +105,54 @@ class ImporterIntegrationTests(unittest.TestCase):
         self.numeric_subject()
         self.test_worker_defers_under_lock_then_records_verified_success()
 
-    def test_numeric_brainvision_mapping_keeps_header_references_on_retry(self):
+    def brainvision(self):
+        """Add a numeric-subject BrainVision recording and return its source directory."""
         self.numeric_subject()
         directory = self.source / 'sub-001/eeg'
         directory.mkdir()
         name = 'sub-001_task-rest_eeg'
         header = directory / (name + '.vhdr')
         header.write_text(
-            'Brain Vision Data Exchange Header File Version 1.0\n'
+            'Brain Vision Data Exchange Header File Version 1.0\n; ' + self.site + '\n'
             '[Common Infos]\nCodepage=UTF-8\nDataFile=' + name + '.eeg\n'
             'MarkerFile=' + name + '.vmrk\nDataFormat=BINARY\n'
             'DataOrientation=MULTIPLEXED\nNumberOfChannels=1\nSamplingInterval=31250\n'
             '[Binary Infos]\nBinaryFormat=INT_16\n'
             '[Channel Infos]\nCh1=Cz,,1,uV\n')
         (directory / (name + '.vmrk')).write_text(
-            'Brain Vision Data Exchange Marker File, Version 1.0\n'
+            'Brain Vision Data Exchange Marker File, Version 1.0\n; ' + self.site + '\n'
             '[Common Infos]\nCodepage=UTF-8\nDataFile=' + name + '.eeg\n'
             '[Marker Infos]\nMk1=New Segment,,1,1,0,20200101000000000000\n')
-        (directory / (name + '.eeg')).write_bytes(bytes(range(64)))
+        (directory / (name + '.eeg')).write_bytes(bytes(range(62)) + self.site[-2:].encode().rjust(2, b'0'))
         (directory / (name + '.json')).write_text(json.dumps({
             'TaskName': 'rest', 'SamplingFrequency': 32, 'PowerLineFrequency': 60,
             'EEGReference': 'Cz', 'SoftwareFilters': 'n/a',
         }))
         (directory / 'sub-001_task-rest_channels.tsv').write_text(
             'name\ttype\tunits\tsampling_frequency\tstatus\nCz\tEEG\tuV\t32\tgood\n')
-        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+        return directory
+
+    def brainvision_view(self):
         self.view = self.view.with_name(self.view.name + '-brainvision')
         runtime.helper('bids-view').prepare_view(
             self.source, self.view, self.settings['project'], self.site, self.name,
             subject_prefix=self.settings['subjectPrefix'])
+
+    def physiological(self):
+        """Return (FilePath, chunk path or None) of the view's physiological files."""
+        with self.engine.connect() as connection:
+            return connection.execute(text(
+                'SELECT f.FilePath, p.Value FROM physiological_file f '
+                'LEFT JOIN (physiological_parameter_file p JOIN parameter_type t '
+                "ON t.ParameterTypeID = p.ParameterTypeID AND t.Name = 'electrophysiology_chunked_dataset_path') "
+                'ON p.PhysiologicalFileID = f.PhysiologicalFileID '
+                'WHERE f.FilePath LIKE :prefix ORDER BY f.FilePath'
+            ), {'prefix': str(self.view.relative_to(runtime.ROOT)) + '/%'}).all()
+
+    def test_numeric_brainvision_mapping_keeps_header_references_on_retry(self):
+        directory = self.brainvision()
+        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+        self.brainvision_view()
         registrations = []
         for _ in range(2):
             self.assertEqual(runtime.import_dataset(self.view, self.settings)['errors'], 0)
@@ -146,9 +165,57 @@ class ImporterIntegrationTests(unittest.TestCase):
         self.assertEqual(self.counts(), (1, 1, 1))
         self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
         self.assertEqual(registrations[0], registrations[1])
-        self.assertEqual(len(registrations[1]), 3)
-        self.assertEqual({Path(row[0]).suffix for row in registrations[1]}, {'.eeg', '.vhdr', '.vmrk'})
+        # The .vhdr header stands for the recording; its .vmrk and .eeg are not registered apart.
+        self.assertEqual([Path(row[0]).suffix for row in registrations[1]], ['.vhdr'])
         self.assertTrue(all((runtime.ROOT / row[1]).is_file() for row in registrations[1]))
+
+    def test_eeg_repair_keeps_the_header_and_records_the_cache_chunk_path(self):
+        directory = self.brainvision()
+        stored = self.annex(directory / 'sub-001_task-rest_eeg.vhdr')
+        self.brainvision_view()
+        original_helper = runtime.helper
+
+        def legacy(name):
+            module = original_helper(name)
+            if name == 'bids_ephys':
+                module.brainvision_primary = lambda files: files
+                module.lazy_chunk_path = lambda data_dir, path: None
+            return module
+
+        with patch.object(runtime, 'helper', side_effect=legacy):
+            self.assertEqual(runtime.import_dataset(self.view, self.settings)['errors'], 0)
+        legacy_rows = self.physiological()
+        self.assertEqual([(Path(row[0]).suffix, row[1]) for row in legacy_rows],
+                         [('.eeg', None), ('.vhdr', None), ('.vmrk', None)])
+
+        repair = runtime.helper('bids_eeg_chunks')
+        with self.assertRaisesRegex(ValueError, 'Expected 2'):
+            repair.repair(self.engine, self.view, runtime.ROOT, 2, apply=True)
+        repair.repair(self.engine, self.view, runtime.ROOT, 3)
+        self.assertEqual(self.physiological(), legacy_rows)
+        repair.repair(self.engine, self.view, runtime.ROOT, 3, apply=True)
+        key = stored.name
+        chunks = 're-move-chunks/%s/dataset/%s/sub-001_task-rest_eeg.chunks' % (self.site, key)
+        header = [row for row in legacy_rows if row[0].endswith('.vhdr')][0][0]
+        self.assertEqual([tuple(row) for row in self.physiological()], [(header, chunks)])
+        with self.engine.connect() as connection:
+            self.assertEqual(connection.scalar(text(
+                'SELECT c.Value FROM Config c JOIN ConfigSettings s ON s.ID = c.ConfigID '
+                "WHERE s.Name = 'useEEGBrowserVisualizationComponents'")), 'true')
+            self.assertEqual(connection.scalar(text(
+                'SELECT COUNT(*) FROM physiological_channel ch JOIN physiological_file f '
+                'ON f.PhysiologicalFileID = ch.PhysiologicalFileID WHERE f.FilePath = :path'), {'path': header}), 1)
+            self.assertTrue(connection.scalar(text(
+                'SELECT COUNT(*) FROM physiological_archive a JOIN physiological_file f '
+                'ON f.PhysiologicalFileID = a.PhysiologicalFileID WHERE f.FilePath = :path'), {'path': header}))
+            self.assertEqual(connection.scalar(text(
+                'SELECT c.Name FROM parameter_type t JOIN parameter_type_category_rel r USING (ParameterTypeID) '
+                'JOIN parameter_type_category c USING (ParameterTypeCategoryID) '
+                "WHERE t.Name = 'electrophysiology_chunked_dataset_path'")), 'Electrophysiology Variables')
+        repair.repair(self.engine, self.view, runtime.ROOT, 1, apply=True)
+        self.assertEqual([tuple(row) for row in self.physiological()], [(header, chunks)])
+        self.assertEqual(runtime.import_dataset(self.view, self.settings)['errors'], 0)
+        self.assertEqual([tuple(row) for row in self.physiological()], [(header, chunks)])
 
     def test_real_import_and_repeat_keep_one_candidate_session_and_file(self):
         runtime.verify_ownership(self.engine, self.source, self.site, self.settings)
@@ -164,7 +231,7 @@ class ImporterIntegrationTests(unittest.TestCase):
         """Move a file into the dataset annex as a locked git-annex link; return its object."""
         import hashlib
         data = path.read_bytes()
-        key = 'MD5E-s%d--%s.nii.gz' % (len(data), hashlib.md5(data).hexdigest())
+        key = 'MD5E-s%d--%s%s' % (len(data), hashlib.md5(data).hexdigest(), ''.join(path.suffixes))
         stored = self.source / '.git/annex/objects/Aa/Bb' / key / key
         stored.parent.mkdir(parents=True)
         path.rename(stored)

@@ -25,7 +25,7 @@ class SetupTests(unittest.TestCase):
               Column('VisitID', Integer), Column('ProjectCohortRelID', Integer)).create(self.engine)
         with Session(self.engine) as db, db.begin():
             db.add(setup.DbUser(username='admin'))
-            for name in ('dataDirBasepath', 'default_bids_vl'):
+            for name in ('dataDirBasepath', 'default_bids_vl', 'useEEGBrowserVisualizationComponents'):
                 db.add(setup.DbConfigSetting(name=name))
 
     def configure(self, db):
@@ -54,6 +54,19 @@ class SetupTests(unittest.TestCase):
             types = {row.name: row.description for row in db.scalars(select(setup.DbImagingFileType))}
         self.assertEqual(set(types), {'eeg', 'vhdr', 'vmrk'})
         self.assertEqual(types['eeg'], 'Site description')
+
+    def test_eeg_visualization_is_turned_on(self):
+        with Session(self.engine) as db, db.begin():
+            setting = db.scalar(select(setup.DbConfigSetting).where(
+                setup.DbConfigSetting.name == 'useEEGBrowserVisualizationComponents'))
+            db.add(setup.DbConfig(setting_id=setting.id, value='false'))
+        for _ in range(2):
+            with Session(self.engine) as db, db.begin():
+                self.configure(db)
+        with Session(self.engine) as db:
+            values = db.scalars(select(setup.DbConfig.value).join(setup.DbConfigSetting).where(
+                setup.DbConfigSetting.name == 'useEEGBrowserVisualizationComponents')).all()
+        self.assertEqual(values, ['true'])
 
     def test_conflicting_configuration_rolls_back(self):
         with Session(self.engine) as db, db.begin():

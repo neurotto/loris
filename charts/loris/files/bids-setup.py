@@ -58,7 +58,7 @@ def configure(db, project_name, project_alias, site_name, site_alias, cohort_nam
     Flush changes within the caller's transaction without committing or importing
     candidates/scans. Return a dictionary containing configured_visits. Global dataDirBasepath and
     default_bids_vl must be compatible; only the installer path placeholder may
-    be replaced automatically. Serialize callers that share the same database.
+    be replaced automatically. useEEGBrowserVisualizationComponents is turned on. Serialize callers that share the same database.
     """
     if not (0 < len(project_alias) <= 4 and 0 < len(site_alias) <= 4):
         raise ValueError('Aliases must contain 1-4 characters')
@@ -124,6 +124,15 @@ def configure(db, project_name, project_alias, site_name, site_alias, cohort_nam
             raise ValueError('Existing ' + name + ' conflicts with the selected import configuration')
         else:
             config.value = value
+
+    # The EEG viewer reads signal chunks; re-move-cache prepares them on first view.
+    setting = db.scalars(select(DbConfigSetting).where(
+        DbConfigSetting.name == 'useEEGBrowserVisualizationComponents')).one()
+    config = db.scalars(select(DbConfig).where(DbConfig.setting_id == setting.id)).one_or_none()
+    if config is None:
+        db.add(DbConfig(setting_id=setting.id, value='true'))
+    else:
+        config.value = 'true'
 
     for extension, description in {
         'eeg': 'BrainVision EEG signal data',

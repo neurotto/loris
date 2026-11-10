@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks the RE-MOVE on-demand content patch (LORIS\ReMove\AnnexContent) inside the LORIS image.
+# Checks the RE-MOVE on-demand content and EEG chunk patch (LORIS\ReMove\AnnexContent) inside the LORIS image.
 set -euo pipefail
 
 image=${LORIS_IMAGE:-docker.io/scilus/loris:29.0.0}
@@ -15,4 +15,5 @@ docker run --rm --network none --user 33:33 -v "$fixtures:/fixtures:ro" \
         done
         php /fixtures/check.php
         php /fixtures/imageinfo.php
+        php /fixtures/chunks.php
     '

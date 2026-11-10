@@ -77,10 +77,11 @@ index 345898c..583605a 100644
  
      return viewer;
 diff --git a/modules/brainbrowser/php/imageinfo.class.inc b/modules/brainbrowser/php/imageinfo.class.inc
-index b3fbaaf..7473896 100644
+index b3fbaaf..bc299b5 100644
 --- a/modules/brainbrowser/php/imageinfo.class.inc
 +++ b/modules/brainbrowser/php/imageinfo.class.inc
-@@ -59,6 +59,13 @@ class ImageInfo extends \NDB_Page
+@@ -58,7 +58,14 @@ class ImageInfo extends \NDB_Page
+                 );
              }
  
 +            // The database cursor is single-pass; both consumers need the rows.
@@ -128,12 +129,194 @@ index b3fbaaf..7473896 100644
      /**
       * Formulate the database results into an appropriate JSON format
       * and return the response.
+diff --git a/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/ajax/index.tsx b/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/ajax/index.tsx
+index 9d5fcdf..319aa75 100644
+--- a/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/ajax/index.tsx
++++ b/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/ajax/index.tsx
+@@ -28,6 +28,43 @@ export const fetchJSON = (url: string, params?: RequestInit) =>
+     return response.json().then((data) => data);
+   });
+ 
++/**
++ * fetchPreparedJSON: fetchJSON for data a server prepares on demand. While
++ * the server answers 503 with state "fetching", wait Retry-After seconds and
++ * ask again.
++ *
++ * @param {string} url - The url to fetch
++ * @param {Function} onWait - Called with the server's message while waiting,
++ *                            with null once the data is served
++ * @param {object} params - The request params
++ * @returns {Promise} - The json data, null if unavailable
++ */
++export const fetchPreparedJSON = (
++  url: string,
++  onWait: (message: string | null, final: boolean) => void,
++  params?: RequestInit,
++) : Promise<any> =>
++  fetch(url, params).then((response) => {
++    if (response.status !== 503) {
++      onWait(null, true);
++      return response.ok ? response.json() : null;
++    }
++    return response.json().catch(() => ({})).then((body) => {
++      const message = body?.error || response.statusText;
++      if (body?.state !== 'fetching') {
++        onWait(message, true);
++        return null;
++      }
++      onWait(message, false);
++      const seconds = Math.min(
++        Math.max(Number(response.headers.get('Retry-After')) || 5, 1),
++        60,
++      );
++      return new Promise((resolve) => setTimeout(resolve, seconds * 1000))
++        .then(() => fetchPreparedJSON(url, onWait, params));
++    });
++  });
++
+ /**
+  * fetchText
+  *
+diff --git a/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/eeglab/EEGLabSeriesProvider.tsx b/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/eeglab/EEGLabSeriesProvider.tsx
+index fc9c8e2..5cd07d7 100644
+--- a/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/eeglab/EEGLabSeriesProvider.tsx
++++ b/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/eeglab/EEGLabSeriesProvider.tsx
+@@ -4,7 +4,7 @@ import {applyMiddleware, createStore, Store} from 'redux';
+ import {Provider} from 'react-redux';
+ import {createEpicMiddleware} from 'redux-observable';
+ import thunk from 'redux-thunk';
+-import {fetchJSON, fetchText} from '../ajax';
++import {fetchJSON, fetchPreparedJSON, fetchText} from '../ajax';
+ import {rootEpic, rootReducer} from '../series/store';
+ import {emptyChannels, setChannels} from '../series/store/state/channels';
+ import {
+@@ -83,6 +83,7 @@ class EEGLabSeriesProvider extends Component<CProps, any> {
+     this.state = {
+       activeMenuOption: 'TAG_MODE',
+       datasetTaggerTabsRef: createRef(),
++      signalStatus: null,
+     };
+ 
+     epicMiddleware.run(rootEpic);
+@@ -187,7 +188,19 @@ class EEGLabSeriesProvider extends Component<CProps, any> {
+       }));
+     });
+ 
+-    Promise.race(racers(fetchJSON, chunksURL, '/index.json')).then(
++    // RE-MOVE: chunks of site recordings are prepared on first view (503).
++    const started = Date.now();
++    const signalStatus = (message: string | null, final: boolean) => {
++      const elapsed = Math.round((Date.now() - started) / 1000);
++      this.setState({
++        signalStatus: message && {
++          message: final ? message : `${message} (${elapsed} s)`,
++          final,
++        },
++      });
++    };
++    const fetchIndex = (url: string) => fetchPreparedJSON(url, signalStatus);
++    Promise.race(racers(fetchIndex, chunksURL, '/index.json')).then(
+       ({json, url}) => {
+         if (json) {
+           const {
+@@ -493,6 +506,18 @@ class EEGLabSeriesProvider extends Component<CProps, any> {
+             />
+           </TriggerableModal>
+         </div>
++        {this.state.signalStatus &&
++          <div
++            className={
++              'alert ' + (
++                this.state.signalStatus.final ? 'alert-warning' : 'alert-info'
++              )
++            }
++            role="status"
++          >
++            {this.state.signalStatus.message}
++          </div>
++        }
+         {signalViewer}
+         {rest}
+       </Provider>
+diff --git a/modules/electrophysiology_browser/php/file_reader.class.inc b/modules/electrophysiology_browser/php/file_reader.class.inc
+index dc3ff45..319c83e 100644
+--- a/modules/electrophysiology_browser/php/file_reader.class.inc
++++ b/modules/electrophysiology_browser/php/file_reader.class.inc
+@@ -36,6 +36,10 @@ class File_Reader extends \NDB_Page
+         switch ($request->getMethod()) {
+         case "GET":
+             $file = $request->getQueryParams()['file'] ?? null;
++            $wait = $this->_reMoveContent($downloadpath, $file);
++            if ($wait !== null) {
++                return $wait;
++            }
+ 
+             $downloader = new \LORIS\FilesDownloadHandler(
+                 new \SPLFileInfo($downloadpath)
+@@ -49,4 +53,57 @@ class File_Reader extends \NDB_Page
+             ));
+         }
+     }
++
++    /**
++     * EEG chunks and raw files of clone-sourced RE-MOVE sites are fetched or
++     * prepared on demand: answer 503 with Retry-After until they exist.
++     *
++     * @param string $downloadpath The data directory, with a trailing slash
++     * @param mixed  $file         The requested file
++     *
++     * @return ?ResponseInterface The 503 response, or null to serve the file
++     */
++    private function _reMoveContent(
++        string $downloadpath,
++        $file
++    ): ?ResponseInterface {
++        if (!is_string($file) || $file === '' || str_contains($file, '..')) {
++            return null;
++        }
++        if (preg_match(
++            '#^(re-move-chunks/[^/]+/[^/]+/[^/]+/[^/]+\.chunks)(/.*)?$#',
++            $file,
++            $match
++        ) !== 1
++        ) {
++            $status = \LORIS\ReMove\AnnexContent::check($downloadpath . $file);
++            return $status === null ? null
++                : \LORIS\ReMove\AnnexContent::response($status);
++        }
++        $index = ($match[2] ?? '') === '/index.json';
++        if (!$index && is_file($downloadpath . $match[1] . '/index.json')) {
++            return null;
++        }
++        $filePath = \NDB_Factory::singleton()->database()->pselectOne(
++            "SELECT pf.FilePath FROM physiological_file pf
++               JOIN physiological_parameter_file ppf
++                 USING (PhysiologicalFileID)
++               JOIN parameter_type pt USING (ParameterTypeID)
++             WHERE pt.Name = 'electrophysiology_chunked_dataset_path'
++               AND ppf.Value = :chunks
++             LIMIT 1",
++            ['chunks' => $match[1]]
++        );
++        if (!is_string($filePath)) {
++            return null;
++        }
++        $status = \LORIS\ReMove\AnnexContent::chunks(
++            $downloadpath,
++            $filePath,
++            $match[1],
++            $index
++        );
++        return $status === null ? null
++            : \LORIS\ReMove\AnnexContent::response($status);
++    }
+ }
 diff --git a/src/ReMove/AnnexContent.php b/src/ReMove/AnnexContent.php
 new file mode 100644
-index 0000000..e012483
+index 0000000..58f9d88
 --- /dev/null
 +++ b/src/ReMove/AnnexContent.php
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,246 @@
 +<?php declare(strict_types=1);
 +
 +namespace LORIS\ReMove;
@@ -145,6 +328,10 @@ index 0000000..e012483
 + * link to git-annex objects of a central clone whose content is fetched on
 + * demand by the re-move-cache service (RE_MOVE_CACHE_URL) and dropped again
 + * after a short time.
++ *
++ * EEG recordings are shown from chunks the cache prepares on demand in
++ * re-move-chunks/<site>/<dataset>/<key>/<stem>.chunks under the data
++ * directory, the chunk path the importer registers for the recording.
 + *
 + * Without RE_MOVE_CACHE_URL, or for files that are not annexed in a site
 + * clone, nothing changes.
@@ -210,25 +397,61 @@ index 0000000..e012483
 +        }
 +        if (is_file($path)) {
 +            // Present: record the access for the cache expiry, best effort.
-+            self::_request($url, $content, 1);
++            self::_request($url, '/content', $content, 1);
 +            return null;
 +        }
-+        $status = self::_request($url, $content, 10);
-+        if ($status === null) {
-+            return [
-+                'state'      => 'unavailable',
-+                'message'    => 'The image cache service is unreachable.',
-+                'retryAfter' => 60,
-+            ];
-+        }
-+        if ($status['state'] === 'present') {
++        return self::_status(
++            self::_request($url, '/content', $content, 10),
++            'The image cache service is unreachable.'
++        );
++    }
++
++    /**
++     * Make sure the EEG chunks of a recording exist, asking the cache to
++     * prepare them.
++     *
++     * @param string $dataDir  The data directory (dataDirBasepath), with a
++     *                         trailing slash
++     * @param string $filePath The recording's FilePath (relative to dataDir,
++     *                         assembly_bids/<import view>/<dataset path>)
++     * @param string $chunks   Its registered chunk path, relative to dataDir
++     * @param bool   $touch    Record an access when the chunks are present
++     *
++     * @return ?array null when LORIS can serve the chunks (present, or not
++     *                managed here), else the cache status like check()
++     */
++    public static function chunks(
++        string $dataDir,
++        string $filePath,
++        string $chunks,
++        bool $touch
++    ): ?array {
++        $url = getenv('RE_MOVE_CACHE_URL');
++        if (!$url) {
 +            return null;
 +        }
-+        return [
-+            'state'      => $status['state'],
-+            'message'    => (string)($status['message'] ?? ''),
-+            'retryAfter' => (int)($status['retryAfter'] ?? 5),
-+        ];
++        $content = self::locate($dataDir . $filePath);
++        $parts   = explode('/', $filePath, 3);
++        if ($content === null || count($parts) !== 3) {
++            return null;
++        }
++        $expected = 're-move-chunks/' . $content['site'] . '/'
++            . $content['dataset'] . '/' . $content['key'] . '/'
++            . pathinfo($filePath, PATHINFO_FILENAME) . '.chunks';
++        if ($chunks !== $expected) {
++            return null;
++        }
++        $content['path'] = $parts[2];
++        if (is_file($dataDir . $chunks . '/index.json')) {
++            if ($touch) {
++                self::_request($url, '/chunks', $content, 1);
++            }
++            return null;
++        }
++        return self::_status(
++            self::_request($url, '/chunks', $content, 10),
++            'The EEG cache service is unreachable.'
++        );
 +    }
 +
 +    /**
@@ -251,18 +474,50 @@ index 0000000..e012483
 +    }
 +
 +    /**
-+     * POST a content request to the cache service.
++     * Turn a cache answer into the status check() and chunks() return.
 +     *
-+     * @param string $url     Base URL of the service
-+     * @param array  $content Site, dataset and key
-+     * @param int    $timeout Seconds
++     * @param ?array $status      The decoded answer, null when unreachable
++     * @param string $unreachable The message when the service is unreachable
++     *
++     * @return ?array null when present, else state, message and retryAfter
++     */
++    private static function _status(?array $status, string $unreachable)
++        : ?array
++    {
++        if ($status === null) {
++            return [
++                'state'      => 'unavailable',
++                'message'    => $unreachable,
++                'retryAfter' => 60,
++            ];
++        }
++        if ($status['state'] === 'present') {
++            return null;
++        }
++        return [
++            'state'      => $status['state'],
++            'message'    => (string)($status['message'] ?? ''),
++            'retryAfter' => (int)($status['retryAfter'] ?? 5),
++        ];
++    }
++
++    /**
++     * POST a request to the cache service.
++     *
++     * @param string $url      Base URL of the service
++     * @param string $endpoint /content or /chunks
++     * @param array  $content  Site, dataset and key (and path for /chunks)
++     * @param int    $timeout  Seconds
 +     *
 +     * @return ?array The decoded status, or null on error
 +     */
-+    private static function _request(string $url, array $content, int $timeout)
-+        : ?array
-+    {
-+        $curl = curl_init(rtrim($url, '/') . '/content');
++    private static function _request(
++        string $url,
++        string $endpoint,
++        array $content,
++        int $timeout
++    ): ?array {
++        $curl = curl_init(rtrim($url, '/') . $endpoint);
 +        curl_setopt_array(
 +            $curl,
 +            [
