@@ -189,6 +189,58 @@ class ImporterIntegrationTests(unittest.TestCase):
         self.assertEqual((result['errors'], result['imported'], result['ignored']), (0, 1, 1))
         self.assertEqual(self.counts(), (2, 1, 1))
 
+    def test_preview_only_repair_fetches_missing_content_and_preserves_registrations(self):
+        repair = runtime.helper('bids_previews')
+        runtime.import_dataset(self.view, self.settings)
+        with self.engine.connect() as connection:
+            relative = connection.scalar(text(
+                "SELECT p.Value FROM parameter_file p JOIN parameter_type t ON p.ParameterTypeID=t.ParameterTypeID "
+                "JOIN files f ON p.FileID=f.FileID WHERE t.Name='check_pic_filename' AND f.File LIKE :prefix"
+            ), {'prefix': str(self.view.relative_to(runtime.ROOT)) + '/%'})
+        preview = runtime.ROOT / 'pic' / relative
+        preview.unlink()
+        content = self.image.read_bytes()
+        self.image.unlink()
+        def fetch(path, root, site, dataset, url):
+            self.assertFalse(path.exists())
+            self.image.write_bytes(content)
+        with patch.object(repair, 'cache_content', side_effect=fetch) as cache:
+            self.assertEqual(repair.repair(
+                self.engine, self.view, runtime.ROOT, self.site, 'dataset', 'http://cache', 1), 1)
+            cache.assert_not_called()
+            self.assertEqual(repair.repair(
+                self.engine, self.view, runtime.ROOT, self.site, 'dataset', 'http://cache', 1, True), 0)
+            self.assertEqual(cache.call_count, 1)
+            self.assertEqual(repair.repair(
+                self.engine, self.view, runtime.ROOT, self.site, 'dataset', 'http://cache', 1, True), 0)
+            self.assertEqual(cache.call_count, 1)
+        self.assertTrue(preview.is_file())
+        self.assertEqual(self.counts(), (1, 1, 1))
+        with self.assertRaisesRegex(ValueError, 'Expected 2'):
+            repair.repair(self.engine, self.view, runtime.ROOT, self.site, 'dataset', 'http://cache', 2, True)
+
+    def test_preview_only_repair_propagates_fetch_failure_without_importing(self):
+        repair = runtime.helper('bids_previews')
+        runtime.import_dataset(self.view, self.settings)
+        with patch.object(repair, 'preview_valid', return_value=False), patch.object(
+                repair, 'cache_content', side_effect=ValueError('site offline')):
+            with self.assertRaisesRegex(ValueError, 'site offline'):
+                repair.repair(self.engine, self.view, runtime.ROOT, self.site, 'dataset', 'http://cache', 1, True)
+        self.assertEqual(self.counts(), (1, 1, 1))
+
+    def test_import_cannot_silently_ignore_missing_preview_with_dropped_image(self):
+        runtime.import_dataset(self.view, self.settings)
+        with self.engine.connect() as connection:
+            relative = connection.scalar(text(
+                "SELECT p.Value FROM parameter_file p JOIN parameter_type t ON p.ParameterTypeID=t.ParameterTypeID "
+                "JOIN files f ON p.FileID=f.FileID WHERE t.Name='check_pic_filename' AND f.File LIKE :prefix"
+            ), {'prefix': str(self.view.relative_to(runtime.ROOT)) + '/%'})
+        (runtime.ROOT / 'pic' / relative).unlink()
+        self.image.unlink()
+        with self.assertRaisesRegex(ValueError, 'acquisition verification'):
+            runtime.import_dataset(self.view, self.settings)
+        self.assertEqual(self.counts(), (1, 1, 1))
+
     def test_partial_file_commit_repairs_preview_on_retry(self):
         from loris_bids_importer.mri import main as mri
         with patch.object(mri, 'create_nifti_preview_picture', side_effect=RuntimeError('synthetic preview failure')):

@@ -910,9 +910,17 @@ def import_dataset(view, settings):
 
         existing = try_get_file_with_path(env.db, path)
         # Clone sources keep only new content during updates; registered files may be dropped.
-        if existing is not None and acquisition.nifti_path.exists():
-            # Upstream commits registration before preview generation, then skips the path on retry.
-            create_nifti_preview_picture(env, existing)
+        if existing is not None:
+            from lib.config import get_data_dir_path_config
+            previews = helper('bids_previews')
+            root = get_data_dir_path_config(env)
+            if not previews.preview_valid(env.db, existing, root):
+                if not acquisition.nifti_path.is_file():
+                    raise ValueError('Registered MRI preview is missing and source content is not cached; '
+                                     'run the approved preview-only repair before retrying import')
+                create_nifti_preview_picture(env, existing)
+                if not previews.preview_valid(env.db, existing, root):
+                    raise ValueError('Registered MRI preview could not be verified after generation')
 
         return original_mri(env, import_env, session, acquisition, bids_info)
 
