@@ -18,7 +18,7 @@ class SetupTests(unittest.TestCase):
         self.engine = create_engine('sqlite://')
         models = [setup.DbProject, setup.DbSite, setup.DbCohort, setup.DbProjectCohort,
                   setup.DbUser, setup.DbUserProject, setup.DbUserSite, setup.DbVisit,
-                  setup.DbVisitWindow, setup.DbConfigSetting, setup.DbConfig]
+                  setup.DbVisitWindow, setup.DbConfigSetting, setup.DbConfig, setup.DbImagingFileType]
         setup.DbProject.metadata.create_all(self.engine, tables=[model.__table__ for model in models])
         Table('visit_project_cohort_rel', MetaData(),
               Column('VisitProjectCohortRelID', Integer, primary_key=True),
@@ -43,6 +43,17 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(db.scalar(select(setup.DbCohort.recruitment_target)), 12)
             self.assertEqual(db.scalar(select(setup.DbSite.alias)), 'SCIL')
         self.assertNotIn('candidate', inspect(self.engine).get_table_names())
+
+    def test_brainvision_file_types_are_seeded_without_overwriting_existing_descriptions(self):
+        with Session(self.engine) as db, db.begin():
+            db.add(setup.DbImagingFileType(name='eeg', description='Site description'))
+        for _ in range(2):
+            with Session(self.engine) as db, db.begin():
+                self.configure(db)
+        with Session(self.engine) as db:
+            types = {row.name: row.description for row in db.scalars(select(setup.DbImagingFileType))}
+        self.assertEqual(set(types), {'eeg', 'vhdr', 'vmrk'})
+        self.assertEqual(types['eeg'], 'Site description')
 
     def test_conflicting_configuration_rolls_back(self):
         with Session(self.engine) as db, db.begin():
@@ -123,7 +134,7 @@ class SetupTests(unittest.TestCase):
                 self.responses = iter([
                     Response(200, b'{}'),
                     Response(200, b'{"Data":[["api","", "Y"],["imaging_browser","", "N"],'
-                                  b'["brainbrowser","", "Y"]]}'),
+                                  b'["brainbrowser","", "Y"],["electrophysiology_browser","", "Y"]]}'),
                     Response(200, b'<html>login</html>'),
                 ])
 
@@ -134,7 +145,7 @@ class SetupTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'HTTP 205'):
                 setup.activate_modules('http://loris', 'admin', 'fixture-not-a-secret')
 
-    def test_module_activation_reenables_disabled_api(self):
+    def test_module_activation_reenables_api_and_separate_electrophysiology_browser(self):
         class Response:
             def __init__(self, status, body):
                 self.status, self.body = status, body
@@ -154,10 +165,11 @@ class SetupTests(unittest.TestCase):
                 self.responses = iter([
                     Response(200, b'{}'),
                     Response(200, b'{"Data":[["api","", "N"],["imaging_browser","", "Y"],'
-                                  b'["brainbrowser","", "Y"]]}'),
+                                  b'["brainbrowser","", "Y"],["electrophysiology_browser","", "N"]]}'),
+                    Response(205, b''),
                     Response(205, b''),
                     Response(200, b'{"Data":[["api","", "Y"],["imaging_browser","", "Y"],'
-                                  b'["brainbrowser","", "Y"]]}'),
+                                  b'["brainbrowser","", "Y"],["electrophysiology_browser","", "Y"]]}'),
                 ])
 
             def open(self, request, timeout):
@@ -168,7 +180,8 @@ class SetupTests(unittest.TestCase):
         opener = Opener()
         with patch.object(setup.urllib.request, 'build_opener', return_value=opener):
             setup.activate_modules('http://loris', 'admin', 'fixture-not-a-secret')
-        self.assertEqual(opener.patched, ['http://loris/module_manager/modules/api'])
+        self.assertEqual(opener.patched, ['http://loris/module_manager/modules/api',
+                                         'http://loris/module_manager/modules/electrophysiology_browser'])
 
     def test_module_activation_requires_api_module(self):
         class Response:

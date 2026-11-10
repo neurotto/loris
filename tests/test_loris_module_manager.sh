@@ -30,7 +30,7 @@ printf '%s' "$admin_password" | jq -Rs '{login: "true", command: "login", userna
 unset admin_password
 
 modules=$(curl -fsS -b "$temporary/cookies" "$url/module_manager/?format=json")
-for module in imaging_browser brainbrowser imaging_qc; do
+for module in imaging_browser brainbrowser electrophysiology_browser imaging_qc; do
     active=$(yq -er --arg name "$module" '.Data[] | select(.[0] == $name) | .[2]' <<< "$modules")
     [[ "$active" == Y || "$active" == N ]] || { printf 'Invalid state for %s.\n' "$module" >&2; exit 1; }
     status=$(printf '{"Active":"%s"}' "$active" |

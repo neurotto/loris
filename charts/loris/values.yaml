@@ -32,8 +32,9 @@ loris:
   adminUser: admin
   publicUrl: http://loris.local
   # Modules the deployment depends on are always kept active: api (serves
-  # imaging-browser thumbnails and BrainBrowser volumes), imaging_browser and
-  # brainbrowser. They are re-enabled at every portal start, and the Module
+  # imaging-browser thumbnails and BrainBrowser volumes), imaging_browser,
+  # brainbrowser and the separate electrophysiology_browser. They are re-enabled
+  # at every portal start, and the Module
   # Manager refuses to deactivate them. List extra modules to protect the same way;
   # the built-in set cannot be removed. Every other module is owned by LORIS admins:
   # Argo sync and portal restarts never change its Module Manager state.

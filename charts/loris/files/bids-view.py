@@ -15,6 +15,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import tempfile
@@ -38,7 +39,19 @@ def annex_object(source, path):
     return target if target.is_relative_to(objects) else None
 
 
-def inspect_source(source):
+def subject_identity(label, prefix=''):
+    """Resolve an explicitly qualified PSCID without changing BIDS paths."""
+    if not isinstance(prefix, str) or (prefix and not re.fullmatch(r'[A-Za-z][A-Za-z0-9]*', prefix)):
+        raise ValueError('subjectPrefix must be an alphanumeric string starting with a letter')
+    if label.isdigit() and not prefix:
+        raise ValueError('Numeric-only subject labels need an explicit CandID/PSCID mapping')
+    identity = prefix + label
+    if prefix and len(identity) > 255:
+        raise ValueError('Qualified subject identity exceeds LORIS PSCID limit of 255 characters')
+    return identity
+
+
+def inspect_source(source, subject_prefix=''):
     """Return participant columns, row dictionaries, and subject directory Paths.
 
     Require readable/traversable source, dataset description presence, and an
@@ -59,8 +72,8 @@ def inspect_source(source):
     if not subjects:
         raise ValueError('No BIDS subject directories found')
 
-    if any(subject.name[4:].isdigit() for subject in subjects):
-        raise ValueError('Numeric-only subject labels need an explicit CandID/PSCID mapping')
+    for subject in subjects:
+        subject_identity(subject.name[4:], subject_prefix)
 
     with (source / 'participants.tsv').open(newline='') as handle:
         reader = csv.DictReader(handle, delimiter='\t')
@@ -80,7 +93,7 @@ def inspect_source(source):
     return fields, rows, subjects
 
 
-def prepare_view(source, destination, project, site, cohort, reuse=False, extend=False):
+def prepare_view(source, destination, project, site, cohort, reuse=False, extend=False, subject_prefix=''):
     """Create or verify a no-copy registration view and return its subject count.
 
     Enrich generated participant rows without overwriting conflicting source
@@ -97,7 +110,7 @@ def prepare_view(source, destination, project, site, cohort, reuse=False, extend
     directories and links are added and participants.tsv is regenerated. Removed
     or changed source files still conflict, because registered paths would break.
     """
-    fields, rows, subjects = inspect_source(source)
+    fields, rows, subjects = inspect_source(source, subject_prefix)
     additions = {'project': project, 'site': site, 'cohort': cohort}
     for field, expected in additions.items():
         if not expected:
@@ -148,7 +161,7 @@ def prepare_view(source, destination, project, site, cohort, reuse=False, extend
 
         with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
             expected = Path(temporary) / 'expected'
-            prepare_view(source, expected, project, site, cohort)
+            prepare_view(source, expected, project, site, cohort, subject_prefix=subject_prefix)
 
             def manifest(root):
                 """Describe comparable view entries, excluding owned generated artifacts."""
@@ -284,12 +297,14 @@ def main():
     parser.add_argument('--project', default='')
     parser.add_argument('--site', default='')
     parser.add_argument('--cohort', default='')
+    parser.add_argument('--subject-prefix', default='')
     args = parser.parse_args()
 
     try:
-        fields, rows, subjects = inspect_source(args.source)
+        fields, rows, subjects = inspect_source(args.source, args.subject_prefix)
         if args.destination:
-            prepare_view(args.source, args.destination, args.project, args.site, args.cohort)
+            prepare_view(args.source, args.destination, args.project, args.site, args.cohort,
+                         subject_prefix=args.subject_prefix)
 
         print(json.dumps({'subjects': len(subjects), 'participant_rows': len(rows),
                           'missing_registration_columns': sorted(set(['project', 'site', 'cohort']) - set(fields)),

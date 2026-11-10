@@ -19,6 +19,7 @@ from lib.db.connect import get_database_engine
 from lib.db.models.cohort import DbCohort
 from lib.db.models.config import DbConfig
 from lib.db.models.config_setting import DbConfigSetting
+from lib.db.models.imaging_file_type import DbImagingFileType
 from lib.db.models.project import DbProject
 from lib.db.models.project_cohort import DbProjectCohort
 from lib.db.models.site import DbSite
@@ -118,19 +119,27 @@ def configure(db, project_name, project_alias, site_name, site_alias, cohort_nam
             db.add(DbConfig(setting_id=setting.id, value=value))
         elif config.value == '/data/%PROJECTNAME%/data/' and name == 'dataDirBasepath':
             config.value = value
+
         elif config.value not in (None, '', value):
             raise ValueError('Existing ' + name + ' conflicts with the selected import configuration')
         else:
             config.value = value
 
+    for extension, description in {
+        'eeg': 'BrainVision EEG signal data',
+        'vhdr': 'BrainVision EEG header',
+        'vmrk': 'BrainVision EEG markers',
+    }.items():
+        ensure(db, DbImagingFileType, {'name': extension}, {'description': description})
+
     return {'configured_visits': len(set(visits) | {default_visit})}
 
 
-REQUIRED_MODULES = ('api', 'imaging_browser', 'brainbrowser')
+REQUIRED_MODULES = ('api', 'imaging_browser', 'brainbrowser', 'electrophysiology_browser')
 
 
 def activate_modules(url, username, password):
-    """Authenticate to LORIS and ensure the API and imaging viewer modules are active.
+    """Ensure the API, imaging viewers and separate electrophysiology browser are active.
 
     imaging_browser thumbnails and BrainBrowser volumes are fetched through the
     `api` module, so disabling it turns every image request into an HTML 404.

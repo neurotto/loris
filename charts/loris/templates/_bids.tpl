@@ -1,5 +1,11 @@
 {{- define "loris.bids.settings" -}}
 {{- $settings := . -}}
+{{- if hasKey $settings "subjectPrefix" -}}
+{{- $prefix := $settings.subjectPrefix -}}
+{{- if or (not (kindIs "string" $prefix)) (not (regexMatch "^([A-Za-z][A-Za-z0-9]*)?$" (toString $prefix))) (gt (len (toString $prefix)) 254) -}}
+{{- fail "subjectPrefix must be an alphanumeric string starting with a letter, at most 254 characters, or empty" -}}
+{{- end -}}
+{{- end -}}
 {{- if hasKey $settings "recruitmentTarget" -}}
 {{- $target := $settings.recruitmentTarget -}}
 {{- if and (ne (toJson $target) "null") (or (not (regexMatch "^[1-9][0-9]*$" (toString $target))) (kindIs "string" $target)) -}}
@@ -24,7 +30,7 @@
 
 {{- define "loris.bids.validate" -}}
 {{- $common := .Values.bidsImport -}}
-{{- $fields := list "project" "projectAlias" "cohort" "recruitmentTarget" "defaultVisit" "datasetType" "createCandidates" "createSessions" "mode" -}}
+{{- $fields := list "project" "projectAlias" "cohort" "recruitmentTarget" "defaultVisit" "datasetType" "createCandidates" "createSessions" "mode" "subjectPrefix" -}}
 {{- range $key, $_ := $common -}}
 {{- if not (has $key (list "enabled" "schedule" "timeZone" "suspend" "activeDeadlineSeconds" "ttlSecondsAfterFinished" "defaults")) -}}
 {{- fail (printf "Deprecated/unknown bidsImport.%s: move registration settings to bidsImport.defaults or sites[].bidsImport; use site name/siteAlias instead of centre and automatic dataset run IDs" $key) -}}

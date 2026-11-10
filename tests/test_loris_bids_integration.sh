@@ -68,4 +68,4 @@ docker run --rm --network "$network" -v "$volume:/data/loris" -v "$ROOT:/workspa
     -e BIDS_TEST_DATABASE_URL -e BIDS_TEST_ADMIN_DATABASE_URL -e PYTHONDONTWRITEBYTECODE=1 \
     -e LORIS_DB_HOST="$database" -e LORIS_DB_NAME=loris -e LORIS_DB_USER=loris \
     -e LORIS_DB_PASSWORD -e LORIS_FRONTEND_ADMIN_PASSWORD \
-    "$image" python3 -m unittest discover -s /workspace/tests -p 'test_loris_bids_*.py' -v
+    "$image" python3 -m unittest discover -s /workspace/tests -p "${BIDS_TEST_PATTERN:-test_loris_bids_*.py}" -v

@@ -402,9 +402,37 @@ directly at the export root:
 ```
 
 Each dataset needs a nonempty `dataset_description.json` `Name` and participant
-rows matching its subject directories. Numeric-only subject labels are rejected
-because they require an explicit candidate identity mapping. Subject PSCIDs are
-global in LORIS, not automatically namespaced by site.
+rows matching its subject directories. Subject PSCIDs are global in LORIS, not
+automatically namespaced by site. Numeric-only labels require an explicit
+`subjectPrefix`, preferably configured per dataset:
+
+```yaml
+sites:
+  - name: nandou
+    # Other required site settings omitted.
+    bidsImport:
+      datasets:
+        sigmo:
+          subjectPrefix: nandousigmo
+```
+
+With that opt-in mapping, BIDS subject `001` registers as PSCID
+`nandousigmo001`; LORIS generates its CandID normally. All subjects in that
+dataset use the prefix. The prefix must start with a letter, contain only
+letters/digits, and leave the full PSCID within 255 characters.
+Source files, published labels, import-view paths and EEG references are unchanged.
+The pinned importer adapter applies the mapping consistently during candidate
+creation, session validation and acquisition lookup, then restores its hooks.
+Changing the prefix of an enrolled dataset is an identity migration and is
+refused, not an ordinary retry. Do not enable a prefix for participants already
+registered under another identity without reviewing that migration.
+Setup also ensures the BrainVision `eeg`, `vhdr`, and `vmrk` imaging-file types
+exist; existing descriptions are preserved.
+Those are shared file-type lookup rows, not MRI scan registrations:
+EEG uses the upstream EEG importer, `physiological_file`/`physiological_archive`
+records and the separate `electrophysiology_browser` module. That browser is
+kept active alongside the API and imaging viewers. Automatic BIDS imports do not
+require enabling the manual `electrophysiology_uploader`.
 
 Discovery ignores hidden directories and the root `derivatives` directory.
 Symlinked dataset directories are rejected. Dataset overrides are **not an
@@ -567,7 +595,8 @@ values are listed below.
 `loris.resources` does not configure MariaDB or the portal's init containers.
 Account for those processes separately when sizing the deployment.
 
-The `api`, `imaging_browser`, and `brainbrowser` modules are always required.
+The `api`, `imaging_browser`, `brainbrowser`, and separate
+`electrophysiology_browser` modules are always required.
 They are re-enabled on each portal start and protected from deactivation in the
 patched Module Manager. Additional required modules must exist in the installed
 LORIS release or startup fails. Other modules remain administrator-managed;
@@ -686,6 +715,9 @@ for prerequisites, diagrams, coverage limitations, report formats, and runtime
 safety. These repository tools are not included in the Helm chart package.
 
 ## Tests
+
+For a focused real-import run, use
+`BIDS_TEST_PATTERN=test_loris_bids_importer.py bash tests/test_loris_bids_integration.sh`.
 
 Tests live in the repository's `tests/` directory:
 

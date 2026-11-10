@@ -64,10 +64,10 @@ ATTEMPTS = Table(
 )
 SETTING_KEYS = {
     'project', 'projectAlias', 'cohort', 'recruitmentTarget', 'defaultVisit',
-    'datasetType', 'createCandidates', 'createSessions', 'mode',
+    'datasetType', 'createCandidates', 'createSessions', 'mode', 'subjectPrefix',
 }
 IDENTITY_KEYS = ('project', 'projectAlias', 'siteAlias', 'cohort', 'defaultVisit',
-                 'datasetType', 'recruitmentTarget')
+                 'datasetType', 'recruitmentTarget', 'subjectPrefix')
 
 
 def now():
@@ -156,6 +156,7 @@ def resolve_settings(config, folder, metadata_name):
         if type(settings[key]) is not bool:
             raise ValueError(key + ' must be boolean')
 
+    helper('bids-view').subject_identity('x', settings.get('subjectPrefix', ''))
     return settings
 
 
@@ -724,7 +725,7 @@ def discover(engine, config, api):
 
                 name = read_name(folder)
                 settings = resolve_settings(config, folder.name, name)
-                helper('bids-view').inspect_source(folder)
+                helper('bids-view').inspect_source(folder, settings.get('subjectPrefix', ''))
                 identity = enroll(engine, site['name'], folder.name, settings, name,
                                   allow_update=site.get('source') == 'clone')
                 row = get_dataset(engine, identity)
@@ -744,13 +745,13 @@ def discover(engine, config, api):
             raise ValueError('Discovery failures: ' + '; '.join(failures))
 
 
-def preflight(engine, source):
+def preflight(engine, source, subject_prefix=''):
     """Validate source metadata, read-only mounting, and configured data/log access.
 
     This checks operational prerequisites without registering metadata or scans.
     ROOT must match LORIS dataDirBasepath, with source below assembly_bids.
     """
-    helper('bids-view').inspect_source(source)
+    helper('bids-view').inspect_source(source, subject_prefix)
     if not os.statvfs(source).f_flag & os.ST_RDONLY:
         raise ValueError('BIDS source must be mounted read-only')
 
@@ -824,7 +825,8 @@ def verify_ownership(engine, source, site, settings):
                 DbCandidate.id.label('id'),
                 DbCandidate.registration_site_id.label('registration_site_id'),
                 DbCandidate.registration_project_id.label('registration_project_id'),
-            ).where(DbCandidate.psc_id == subject.name[4:])).one_or_none()
+            ).where(DbCandidate.psc_id == helper('bids-view').subject_identity(
+                subject.name[4:], settings.get('subjectPrefix', '')))).one_or_none()
             if candidate is None:
                 continue
 
@@ -860,12 +862,33 @@ def import_dataset(view, settings):
     from loris_bids_importer.mri import main as mri
     from loris_bids_importer.scripts import import_bids_dataset as cli
     from loris_bids_importer.copy_files import get_loris_bids_file_path
+    from loris_bids_importer.validation import subjects, sessions
+    from loris_bids_utils.files.participants import BidsParticipantTsvRow
+    from dataclasses import replace
     from lib.db.queries.file import try_get_file_with_path
     from lib.imaging_lib.nifti_pic import create_nifti_preview_picture
 
     original_summary = importer.print_bids_import_summary
     original_mri = mri.import_bids_mri_acquisition
+    original_subject = subjects.validate_bids_subject
+    original_session_subject = sessions.validate_bids_subject
+    original_candidate_lookup = importer.try_get_candidate_with_psc_id
     summary = []
+
+    def qualified_identity(label):
+        return helper('bids-view').subject_identity(label, settings.get('subjectPrefix', ''))
+
+    def mapped_subject(env, info, create_candidate=False):
+        """Map only database identity; BIDS paths and EEG references stay intact."""
+        identity = qualified_identity(info.subject)
+        participant = info.participant_row
+        if participant is not None:
+            participant = BidsParticipantTsvRow({**participant.data, 'participant_id': identity})
+        return original_subject(env, replace(info, subject=identity, participant_row=participant),
+                                create_candidate)
+
+    def mapped_candidate_lookup(db, label):
+        return original_candidate_lookup(db, qualified_identity(label))
 
     def checked_summary(env, result):
         """Capture upstream counts and reject incomplete or error-bearing outcomes."""
@@ -896,6 +919,10 @@ def import_dataset(view, settings):
     original_argv = sys.argv
     importer.print_bids_import_summary = checked_summary
     mri.import_bids_mri_acquisition = checked_mri
+    if settings.get('subjectPrefix'):
+        subjects.validate_bids_subject = mapped_subject
+        sessions.validate_bids_subject = mapped_subject
+        importer.try_get_candidate_with_psc_id = mapped_candidate_lookup
     sys.argv = [
         'import-bids-dataset',
         '--profile', 'config.py',
@@ -920,6 +947,9 @@ def import_dataset(view, settings):
         sys.argv = original_argv
         importer.print_bids_import_summary = original_summary
         mri.import_bids_mri_acquisition = original_mri
+        subjects.validate_bids_subject = original_subject
+        sessions.validate_bids_subject = original_session_subject
+        importer.try_get_candidate_with_psc_id = original_candidate_lookup
 
 
 def worker(engine, config, identity, attempt):
@@ -957,7 +987,7 @@ def worker(engine, config, identity, attempt):
             if read_name(source) != row['metadata_name']:
                 raise ValueError('Dataset Name changed after discovery')
 
-            helper('bids-view').inspect_source(source)
+            helper('bids-view').inspect_source(source, settings.get('subjectPrefix', ''))
             if source.is_symlink() or not source.resolve().is_relative_to(ROOT / 'assembly_bids' / row['site']):
                 raise ValueError('Dataset source escapes its site mount')
 
@@ -970,7 +1000,7 @@ def worker(engine, config, identity, attempt):
             if settings['mode'] != 'preflight':
                 setup_dataset(engine, source, row['site'], settings)
 
-            preflight(engine, source)
+            preflight(engine, source, settings.get('subjectPrefix', ''))
             outcome = {'mode': settings['mode']}
             if settings['mode'] == 'import':
                 verify_ownership(engine, source, row['site'], settings)
@@ -980,7 +1010,8 @@ def worker(engine, config, identity, attempt):
 
                 helper('bids-view').prepare_view(source, view, settings['project'], row['site'],
                                                 settings['cohort'], reuse=True,
-                                                extend=site.get('source') == 'clone')
+                                                extend=site.get('source') == 'clone',
+                                                subject_prefix=settings.get('subjectPrefix', ''))
                 outcome.update(import_dataset(view, settings))
 
             record(engine, identity, attempt, 'succeeded')

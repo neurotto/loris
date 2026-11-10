@@ -126,5 +126,5 @@
 {{- range $extra -}}
 {{- if not (and (kindIs "string" .) (regexMatch "^[a-z][a-z0-9_]*$" .)) }}{{ fail (printf "loris.additionalRequiredModules entry %v must be a LORIS module name" .) }}{{ end -}}
 {{- end -}}
-{{- concat (list "api" "imaging_browser" "brainbrowser") $extra | uniq | toJson -}}
+{{- concat (list "api" "imaging_browser" "brainbrowser" "electrophysiology_browser") $extra | uniq | toJson -}}
 {{- end }}

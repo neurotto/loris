@@ -347,9 +347,9 @@ assert_resources 'required LORIS modules are enforced by an unprivileged init co
         length == 1 and all(.[];
             .initContainers[-1].name == "activate-loris-modules" and
             (.initContainers[-1].env[] | select(.name == "LORIS_REQUIRED_MODULES") | .value | fromjson) ==
-                ["api", "imaging_browser", "brainbrowser"] and
+                ["api", "imaging_browser", "brainbrowser", "electrophysiology_browser"] and
             (.containers[] | select(.name == "loris") | .env[] | select(.name == "LORIS_REQUIRED_MODULES") |
-                .value | fromjson) == ["api", "imaging_browser", "brainbrowser"] and
+                .value | fromjson) == ["api", "imaging_browser", "brainbrowser", "electrophysiology_browser"] and
             (.initContainers[-1].env[] | select(.name == "LORIS_DB_PASSWORD") | .valueFrom.secretKeyRef.key) ==
                 "LORIS_DB_PASSWORD" and
             ([.initContainers[-1].env[].name] | index("MARIADB_ROOT_PASSWORD") == null) and
@@ -361,7 +361,7 @@ assert_resources 'additional required modules extend, but never replace, the bui
     [.[] | select(.kind == "Deployment" and .metadata.name == "loris") | .spec.template.spec |
         (.initContainers[-1].env[], (.containers[] | select(.name == "loris") | .env[])) |
         select(.name == "LORIS_REQUIRED_MODULES") | .value | fromjson] |
-        length == 2 and all(.[]; . == ["api", "imaging_browser", "brainbrowser", "dashboard"])'
+        length == 2 and all(.[]; . == ["api", "imaging_browser", "brainbrowser", "electrophysiology_browser", "dashboard"])'
 
 for invalid in '"api"' '["api", "Bad;name"]' '[1]'; do
     if render_chart "{\"enabled\": true, \"loris\": {\"additionalRequiredModules\": $invalid}}" >/dev/null 2>&1; then
@@ -371,5 +371,23 @@ for invalid in '"api"' '["api", "Bad;name"]' '[1]'; do
 done
 tests_passed=$((tests_passed + 1))
 printf 'PASS: invalid loris.additionalRequiredModules values are rejected\n'
+
+rendered=$(render_chart '{"enabled":true,"loris":{"data":{"persistence":{"enabled":true}}},
+    "bidsImport":{"enabled":true},"sites":[{"name":"nandou","siteAlias":"NAND","enabled":true,
+    "server":"nfs.example.invalid","bidsImport":{"enabled":true,
+    "datasets":{"sigmo":{"subjectPrefix":"nandousigmo"}}}}]}')
+assert_resources 'dataset subject prefix reaches the frozen import profile' '
+    [.[] | select(.kind == "ConfigMap" and .data["runtime.json"] != null) |
+        .data["runtime.json"] | fromjson |
+        .site.bidsImport.datasets.sigmo.subjectPrefix] == ["nandousigmo"]'
+
+for invalid in '"001"' '"../escape"' 'false' '123'; do
+    if render_chart "{\"enabled\":true,\"bidsImport\":{\"defaults\":{\"subjectPrefix\":$invalid}}}" >/dev/null 2>&1; then
+        printf 'FAIL: invalid subjectPrefix %s must not render\n' "$invalid" >&2
+        exit 1
+    fi
+done
+tests_passed=$((tests_passed + 1))
+printf 'PASS: invalid subject prefixes are rejected\n'
 
 printf 'All %s LORIS chart tests passed.\n' "$tests_passed"

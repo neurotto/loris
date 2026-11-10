@@ -111,6 +111,23 @@ class RuntimeTests(unittest.TestCase):
         settings = runtime.resolve_settings(self.config, 'dataset', 'Dataset')
         return runtime.enroll(self.engine, 'nandou', 'dataset', settings, 'Dataset'), settings
 
+    def test_numeric_subject_discovery_requires_explicit_prefix(self):
+        (self.source / 'sub-example').rename(self.source / 'sub-001')
+        (self.source / 'participants.tsv').write_text('participant_id\nsub-001\n')
+        with self.assertRaisesRegex(ValueError, 'Numeric-only'):
+            self.discovery()
+        self.config['site']['bidsImport']['datasets'] = {'dataset': {'subjectPrefix': 'nandousigmo'}}
+        self.discovery()
+        identity = runtime.dataset_id('nandou', 'dataset')
+        self.assertEqual(json.loads(runtime.get_dataset(self.engine, identity)['settings'])['subjectPrefix'],
+                         'nandousigmo')
+
+    def test_prefix_change_is_identity_migration_not_retry(self):
+        identity, settings = self.enroll()
+        settings['subjectPrefix'] = 'another'
+        with self.assertRaisesRegex(ValueError, 'identity/configuration changed'):
+            runtime.enroll(self.engine, 'nandou', 'dataset', settings, 'Dataset')
+
     def discovery(self):
         with patch.object(runtime, 'initialize'), patch.object(runtime, 'database_lock', unlocked):
             runtime.discover(self.engine, self.config, self.api)

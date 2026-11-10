@@ -42,6 +42,28 @@ class BidsViewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Numeric-only'):
             bids_view.inspect_source(self.source)
 
+    def test_explicit_prefix_preserves_numeric_bids_paths_and_rows(self):
+        source = self.root / 'numeric'
+        source.mkdir()
+        (source / 'dataset_description.json').write_text('{"Name":"numeric"}')
+        (source / 'participants.tsv').write_text('participant_id\nsub-001\n')
+        (source / 'sub-001').mkdir()
+        (source / 'sub-001/sub-001_eeg.vhdr').write_text('DataFile=sub-001_eeg.eeg')
+        destination = self.root / 'view'
+        for _ in range(2):
+            bids_view.prepare_view(source, destination, 'Project', 'nandou', 'Sigmo',
+                                   reuse=True, subject_prefix='nandousigmo')
+        self.assertIn('sub-001', (destination / 'participants.tsv').read_text())
+        self.assertEqual((destination / 'sub-001/sub-001_eeg.vhdr').read_text(),
+                         'DataFile=sub-001_eeg.eeg')
+        self.assertEqual(bids_view.subject_identity('001', 'nandousigmo'), 'nandousigmo001')
+        self.assertEqual((source / 'participants.tsv').read_text(), 'participant_id\nsub-001\n')
+
+    def test_subject_prefix_rejects_invalid_or_oversized_identities(self):
+        for prefix in ('12', '../escape', None, 'a' * 255):
+            with self.subTest(prefix=prefix), self.assertRaises(ValueError):
+                bids_view.subject_identity('001', prefix)
+
     def test_conflicting_metadata_is_not_overwritten(self):
         (self.source / 'participants.tsv').write_text('participant_id\tproject\nsub-example\tOther\n')
         with self.assertRaisesRegex(ValueError, 'conflicts'):

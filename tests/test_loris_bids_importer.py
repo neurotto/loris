@@ -58,14 +58,97 @@ class ImporterIntegrationTests(unittest.TestCase):
 
     def counts(self):
         prefix = str(self.view.relative_to(runtime.ROOT)) + '/%'
+        identity = self.settings.get('subjectPrefix', '') + self.subject
         with self.engine.connect() as connection:
             files = connection.scalar(text('SELECT COUNT(*) FROM files WHERE File LIKE :prefix'), {'prefix': prefix})
             candidates = connection.scalar(text('SELECT COUNT(*) FROM candidate WHERE PSCID = :subject'),
-                                           {'subject': self.subject})
+                                           {'subject': identity})
             sessions = connection.scalar(text(
                 'SELECT COUNT(*) FROM session JOIN candidate ON session.CandidateID = candidate.ID '
-                'WHERE candidate.PSCID = :subject'), {'subject': self.subject})
+                'WHERE candidate.PSCID = :subject'), {'subject': identity})
         return files, candidates, sessions
+
+    def numeric_subject(self):
+        subject = self.source / ('sub-' + self.subject)
+        for path in subject.rglob('*'):
+            if path.is_file():
+                path.rename(path.with_name(path.name.replace('sub-' + self.subject, 'sub-001')))
+        subject.rename(self.source / 'sub-001')
+        self.subject = '001'
+        self.image = self.source / 'sub-001/anat/sub-001_T1w.nii.gz'
+        (self.source / 'participants.tsv').write_text('participant_id\tsex\nsub-001\tM\n')
+        self.settings['subjectPrefix'] = 'mapped' + self.site
+        self.view = self.view.with_name(self.view.name + '-numeric')
+        runtime.helper('bids-view').prepare_view(
+            self.source, self.view, self.settings['project'], self.site, self.name,
+            subject_prefix=self.settings['subjectPrefix'])
+
+    def test_numeric_subject_mapping_imports_and_retries_without_relabelling_source(self):
+        self.numeric_subject()
+        original = (self.source / 'participants.tsv').read_bytes()
+        runtime.verify_ownership(self.engine, self.source, self.site, self.settings)
+        self.assertEqual(runtime.import_dataset(self.view, self.settings)['imported'], 1)
+        runtime.verify_ownership(self.engine, self.source, self.site, self.settings)
+        self.assertEqual(runtime.import_dataset(self.view, self.settings)['ignored'], 1)
+        self.assertEqual(self.counts(), (1, 1, 1))
+        self.assertEqual((self.source / 'participants.tsv').read_bytes(), original)
+        self.assertTrue(self.image.is_file())
+        self.assertTrue((self.view / 'sub-001/anat/sub-001_T1w.nii.gz').is_symlink())
+        with self.assertRaisesRegex(ValueError, 'different site/project'):
+            runtime.verify_ownership(self.engine, self.source, 'another-site', self.settings)
+
+    def test_numeric_subject_eeg_mapping_resumes_without_duplicate_registrations(self):
+        self.numeric_subject()
+        self.test_eeg_partial_registration_resumes_archives_without_duplicate_files()
+
+    def test_numeric_subject_worker_completes_preflight_and_records_success(self):
+        self.numeric_subject()
+        self.test_worker_defers_under_lock_then_records_verified_success()
+
+    def test_numeric_brainvision_mapping_keeps_header_references_on_retry(self):
+        self.numeric_subject()
+        directory = self.source / 'sub-001/eeg'
+        directory.mkdir()
+        name = 'sub-001_task-rest_eeg'
+        header = directory / (name + '.vhdr')
+        header.write_text(
+            'Brain Vision Data Exchange Header File Version 1.0\n'
+            '[Common Infos]\nCodepage=UTF-8\nDataFile=' + name + '.eeg\n'
+            'MarkerFile=' + name + '.vmrk\nDataFormat=BINARY\n'
+            'DataOrientation=MULTIPLEXED\nNumberOfChannels=1\nSamplingInterval=31250\n'
+            '[Binary Infos]\nBinaryFormat=INT_16\n'
+            '[Channel Infos]\nCh1=Cz,,1,uV\n')
+        (directory / (name + '.vmrk')).write_text(
+            'Brain Vision Data Exchange Marker File, Version 1.0\n'
+            '[Common Infos]\nCodepage=UTF-8\nDataFile=' + name + '.eeg\n'
+            '[Marker Infos]\nMk1=New Segment,,1,1,0,20200101000000000000\n')
+        (directory / (name + '.eeg')).write_bytes(bytes(range(64)))
+        (directory / (name + '.json')).write_text(json.dumps({
+            'TaskName': 'rest', 'SamplingFrequency': 32, 'PowerLineFrequency': 60,
+            'EEGReference': 'Cz', 'SoftwareFilters': 'n/a',
+        }))
+        (directory / 'sub-001_task-rest_channels.tsv').write_text(
+            'name\ttype\tunits\tsampling_frequency\tstatus\nCz\tEEG\tuV\t32\tgood\n')
+        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+        self.view = self.view.with_name(self.view.name + '-brainvision')
+        runtime.helper('bids-view').prepare_view(
+            self.source, self.view, self.settings['project'], self.site, self.name,
+            subject_prefix=self.settings['subjectPrefix'])
+        registrations = []
+        for _ in range(2):
+            self.assertEqual(runtime.import_dataset(self.view, self.settings)['errors'], 0)
+            with self.engine.connect() as connection:
+                registrations.append(connection.execute(text(
+                    'SELECT f.FilePath, a.FilePath FROM physiological_file f '
+                    'JOIN physiological_archive a ON a.PhysiologicalFileID = f.PhysiologicalFileID '
+                    'WHERE f.FilePath LIKE :prefix ORDER BY f.FilePath'
+                ), {'prefix': str(self.view.relative_to(runtime.ROOT)) + '/%'}).all())
+        self.assertEqual(self.counts(), (1, 1, 1))
+        self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
+        self.assertEqual(registrations[0], registrations[1])
+        self.assertEqual(len(registrations[1]), 3)
+        self.assertEqual({Path(row[0]).suffix for row in registrations[1]}, {'.eeg', '.vhdr', '.vmrk'})
+        self.assertTrue(all((runtime.ROOT / row[1]).is_file() for row in registrations[1]))
 
     def test_real_import_and_repeat_keep_one_candidate_session_and_file(self):
         runtime.verify_ownership(self.engine, self.source, self.site, self.settings)
@@ -171,7 +254,7 @@ class ImporterIntegrationTests(unittest.TestCase):
         def field(value, width):
             return str(value).ljust(width).encode('ascii')
         header = b''.join(field(value, width) for value, width in [
-            ('0', 8), ('synthetic', 80), ('synthetic', 80), ('01.01.01', 8), ('00.00.00', 8),
+            ('0', 8), ('synthetic ' + self.site, 80), ('synthetic', 80), ('01.01.01', 8), ('00.00.00', 8),
             (512, 8), ('', 44), (1, 8), (1, 8), (1, 4),
             ('Cz', 16), ('', 80), ('uV', 8), (-1, 8), (1, 8), (-32768, 8), (32767, 8),
             ('', 80), (32, 8), ('', 32),
@@ -185,16 +268,19 @@ class ImporterIntegrationTests(unittest.TestCase):
             'name\ttype\tunits\tsampling_frequency\tstatus\nCz\tEEG\tuV\t32\tgood\n')
         self.view = self.view.with_name(self.view.name + '-eeg')
         runtime.helper('bids-view').prepare_view(
-            self.source, self.view, self.settings['project'], self.site, self.name)
+            self.source, self.view, self.settings['project'], self.site, self.name,
+            subject_prefix=self.settings.get('subjectPrefix', ''))
         with patch.object(eeg, 'import_physio_file_archive', side_effect=RuntimeError('synthetic archive failure')):
             with self.assertRaisesRegex(ValueError, 'acquisition verification'):
                 runtime.import_dataset(self.view, self.settings)
         runtime.helper('bids-view').prepare_view(
-            self.source, self.view, self.settings['project'], self.site, self.name, reuse=True)
+            self.source, self.view, self.settings['project'], self.site, self.name, reuse=True,
+            subject_prefix=self.settings.get('subjectPrefix', ''))
         result = runtime.import_dataset(self.view, self.settings)
         self.assertEqual(result['errors'], 0)
         runtime.helper('bids-view').prepare_view(
-            self.source, self.view, self.settings['project'], self.site, self.name, reuse=True)
+            self.source, self.view, self.settings['project'], self.site, self.name, reuse=True,
+            subject_prefix=self.settings.get('subjectPrefix', ''))
         runtime.import_dataset(self.view, self.settings)
         self.assertEqual(self.counts(), (1, 1, 1))
         with self.engine.connect() as connection:
