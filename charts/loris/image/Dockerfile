@@ -82,9 +82,9 @@ RUN docker-php-ext-install gettext \
 
 WORKDIR /var/www/loris
 COPY --chmod=0444 ephys-chunker-metadata.patch /tmp/ephys-chunker-metadata.patch
-RUN cd "$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
-    && patch --batch --dry-run -p1 < /tmp/ephys-chunker-metadata.patch \
-    && patch --batch -p1 < /tmp/ephys-chunker-metadata.patch \
+RUN purelib="$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
+    && patch --batch --dry-run -d "$purelib" -p1 < /tmp/ephys-chunker-metadata.patch \
+    && patch --batch -d "$purelib" -p1 < /tmp/ephys-chunker-metadata.patch \
     && rm /tmp/ephys-chunker-metadata.patch
 
 EXPOSE 80
