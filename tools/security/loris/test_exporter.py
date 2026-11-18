@@ -39,11 +39,12 @@ class ExporterTests(unittest.TestCase):
             self.audit.profiles()
         self.assertFalse(any(check["status"] == "error" for check in self.audit.checks))
         self.assertEqual(scanned, [
-            ("disabled", 0, True), ("path-only", 0, True), ("clients-only", 0, True),
-            ("enabled", 1, False), ("custom-port", 1, False),
+            ("disabled", 0, True), ("enabled", 1, False), ("custom-port", 1, False),
         ])
-        self.assertEqual(self.audit.checks[-1]["name"], "profile/negative-missing-group")
-        self.assertEqual(self.audit.checks[-1]["status"], "passed")
+        self.assertEqual([check["name"] for check in self.audit.checks[-3:]], [
+            "profile/negative-path-only", "profile/negative-clients-only", "profile/negative-missing-group",
+        ])
+        self.assertTrue(all(check["status"] == "passed" for check in self.audit.checks[-3:]))
 
     def test_invariants_reject_writable_mount_and_host_network(self):
         documents = self.render("-f", str(HERE / "profiles/exporter-enabled.yaml"))

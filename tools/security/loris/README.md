@@ -53,11 +53,11 @@ python tools/security/loris/audit.py \
 Exporter coverage includes:
 
 - **Render profiles**:
-  - dormant defaults, path-only, and clients-only profiles, each required to
-    render no resources;
+  - dormant defaults, required to render no resources;
   - an enabled profile;
   - a custom-port/identity/multiple-client profile;
-  - an exact missing-group validation failure.
+  - exact validation failures for path-only and clients-only partial
+    configurations and for a missing group.
 - **Schema and policy**: Helm lint, pinned Kubernetes schemas, and embedded Trivy
   policies for enabled Deployments and the Dockerfile.
 - **Explicit assertions**: read-only source mount, root filesystem, capabilities,

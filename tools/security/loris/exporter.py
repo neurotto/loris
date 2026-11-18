@@ -22,24 +22,25 @@ class ExporterAudit(Audit):
         ]
 
     def profiles(self) -> None:
-        for name in ("disabled", "path-only", "clients-only", "enabled", "custom-port"):
+        for name in ("disabled", "enabled", "custom-port"):
             self.check(f"profile/{name}", lambda name=name: self.profile(name))
+        for name, values in (("path-only", ["--set", "dataPath=/var/local/loris-audit-source"]),
+                             ("clients-only", ["--set", "allowedClientCIDRs[0]=192.0.2.10/32"])):
+            self.check(f"profile/negative-{name}", lambda values=values: self.run(
+                ["helm", "template", "audit", str(self.chart), *values],
+                expected_error="exporter is enabled only when both dataPath and allowedClientCIDRs are provided"))
         self.check("profile/negative-missing-group", self.negative)
 
     def profile(self, name: str) -> None:
         if name == "disabled":
             values = []
-        elif name == "path-only":
-            values = ["--set", "dataPath=/var/local/loris-audit-source"]
-        elif name == "clients-only":
-            values = ["--set", "allowedClientCIDRs[0]=192.0.2.10/32"]
         else:
             values = ["-f", str(HERE / "profiles/exporter-enabled.yaml")]
             if name == "custom-port":
                 values.extend(["--set", "nfsPort=20500", "--set", "exportUid=12001",
                                "--set", "exportGid=3000", "--set", "allowedClientCIDRs[1]=192.0.2.11/32"])
         documents = self.render(values)
-        dormant = name in ("disabled", "path-only", "clients-only")
+        dormant = name == "disabled"
         if not dormant:
             self.invariants(documents, 20500 if name == "custom-port" else 20490)
         self.validate_profile(name, documents, dormant)
@@ -80,7 +81,7 @@ class ExporterAudit(Audit):
     def negative(self) -> None:
         command = ["helm", "template", "audit", str(self.chart),
                    "-f", str(HERE / "profiles/exporter-enabled.yaml"), "--set", "exportGid="]
-        self.run(command, expected_error="exportGid must be the source data's owning group ID")
+        self.run(command, expected_error="exportGid must be a nonzero integer from 1 to 2147483647 when the exporter is enabled")
 
     def sources(self) -> None:
         super().sources()
