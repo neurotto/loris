@@ -273,40 +273,6 @@ class RuntimeTests(unittest.TestCase):
             self.enroll()
         self.assertEqual(runtime.get_dataset(self.engine, identity)['attempt'], 0)
 
-    def annex(self, relative, key, content=None):
-        path = self.source / relative
-        objects = self.source / '.git/annex/objects/Xx/Yy' / key
-        objects.mkdir(parents=True, exist_ok=True)
-        if content is not None:
-            (objects / key).write_bytes(content)
-        path.unlink()
-        path.symlink_to(os.path.relpath(objects / key, path.parent))
-        return objects / key
-
-    def test_annex_fingerprint_ignores_content_presence_and_git_metadata(self):
-        stored = self.annex('sub-example/anat/sub-example_T1w.nii.gz', 'MD5E-s7--x.nii.gz', b'fixture')
-        present = runtime.source_fingerprint(self.source)
-        stored.unlink()
-        (self.source / '.git/HEAD').write_text('ref: refs/heads/main\n')
-        self.assertEqual(runtime.source_fingerprint(self.source), present)
-        self.annex('sub-example/anat/sub-example_T1w.nii.gz', 'MD5E-s7--y.nii.gz')
-        self.assertNotEqual(runtime.source_fingerprint(self.source), present)
-
-    def test_clone_sources_reimport_updates_but_not_during_an_attempt(self):
-        self.config['site']['source'] = 'clone'
-        self.annex('sub-example/anat/sub-example_T1w.nii.gz', 'MD5E-s7--x.nii.gz')
-        self.discovery()
-        identity, _ = self.enroll()
-        runtime.record(self.engine, identity, 1, 'succeeded')
-        self.annex('sub-example/anat/sub-example_T1w.nii.gz', 'MD5E-s7--y.nii.gz')
-        self.discovery()
-        row = runtime.get_dataset(self.engine, identity)
-        self.assertEqual((row['attempt'], row['status']), (2, 'reserved'))
-        self.annex('sub-example/anat/sub-example_T1w.nii.gz', 'MD5E-s7--z.nii.gz')
-        with self.assertRaisesRegex(ValueError, 'active attempt'):
-            runtime.enroll(self.engine, 'nandou', 'dataset', runtime.resolve_settings(self.config, 'dataset', 'Dataset'),
-                           'Dataset', allow_update=True)
-
     def test_renamed_folder_cannot_bypass_import_history(self):
         self.enroll()
         self.source.rename(self.site / 'renamed')

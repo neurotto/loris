@@ -1,0 +1,12 @@
+diff --git a/loris_ephys_chunker/chunking.py b/loris_ephys_chunker/chunking.py
+--- a/loris_ephys_chunker/chunking.py
++++ b/loris_ephys_chunker/chunking.py
+@@ -248,7 +248,7 @@
+         channel_metadata,
+         chunk_size,
+-        valid_samples_in_last_chunk,
+         list(range(len(channel_chunks_list))),
++        valid_samples_in_last_chunk,
+         [list(downsampled.shape) for downsampled in channel_chunks_list]
+     )
+     write_chunks(chunk_dir, channel_chunks_list, from_channel_index)

@@ -45,19 +45,17 @@ RUN git clone --depth 1 --branch "v${LORIS_VERSION}" https://github.com/aces/Lor
 
 COPY --chmod=0444 bootstrap-loris.php /usr/local/bin/bootstrap-loris.php
 COPY --chmod=0444 module-manager-empty-response.patch module-manager-required-modules.patch \
-    brainbrowser-react-mount.patch re-move-annex-content.patch /tmp/patches/
+    brainbrowser-react-mount.patch content-provider.patch /tmp/patches/
 
-# Patches go in before the webpack build: re-move-annex-content changes the EEG viewer sources.
-# re-move-annex-content: on-demand content of clone-sourced sites (RE_MOVE_CACHE_URL), 503 Retry-After
-# instead of 404 with BrainBrowser and EEG viewer retries, EEG chunks prepared by re-move-cache.
+# Patches go in before the webpack build so the generic content provider and EEG viewer changes are included.
 RUN cd /var/www/loris \
     && for patch in module-manager-empty-response module-manager-required-modules \
-        brainbrowser-react-mount re-move-annex-content; do \
+        brainbrowser-react-mount content-provider; do \
         git apply --check "/tmp/patches/${patch}.patch" && git apply "/tmp/patches/${patch}.patch" || exit 1; \
     done \
     && rm -r /tmp/patches \
     && php -l modules/module_manager/php/modules.class.inc \
-    && php -l src/ReMove/AnnexContent.php \
+    && php -l src/ContentProvider.php \
     && php -l modules/api/php/endpoints/candidate/visit/image/image.class.inc \
     && php -l modules/brainbrowser/php/imageinfo.class.inc \
     && php -l modules/electrophysiology_browser/php/file_reader.class.inc \
@@ -83,5 +81,11 @@ RUN docker-php-ext-install gettext \
     && sed -i 's@DocumentRoot /var/www/html@DocumentRoot /var/www/loris/htdocs@' /etc/apache2/sites-available/000-default.conf
 
 WORKDIR /var/www/loris
+COPY --chmod=0444 ephys-chunker-metadata.patch /tmp/ephys-chunker-metadata.patch
+RUN cd "$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
+    && patch --batch --dry-run -p1 < /tmp/ephys-chunker-metadata.patch \
+    && patch --batch -p1 < /tmp/ephys-chunker-metadata.patch \
+    && rm /tmp/ephys-chunker-metadata.patch
+
 EXPOSE 80
 CMD ["apache2-foreground"]

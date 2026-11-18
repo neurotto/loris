@@ -1,6 +1,5 @@
 import importlib.util
 import json
-import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -104,49 +103,19 @@ class BidsViewTests(unittest.TestCase):
         (destination / bids_view.ARTIFACTS).write_text(json.dumps({'modified.tgz': '0' * 64}))
         with self.assertRaisesRegex(ValueError, 'artifact was modified'):
             bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True)
-
-
-    def annex(self, relative, key, content=None):
-        """Replace a source file with a locked git-annex link, optionally without content."""
-        path = self.source / relative
-        objects = self.source / '.git/annex/objects/Xx/Yy' / key
-        objects.mkdir(parents=True, exist_ok=True)
-        if content is not None:
-            (objects / key).write_bytes(content)
-        if path.exists() or path.is_symlink():
-            path.unlink()
-        path.symlink_to(os.path.relpath(objects / key, path.parent))
-        return objects / key
-
-    def test_annexed_files_link_by_key_without_content_and_skip_git(self):
-        nifti = 'sub-example/ses-000/anat/sub-example_ses-000_T1w.nii.gz'
-        target = self.annex(nifti, 'MD5E-s4--a.nii.gz')
-        (self.source / '.git/config').write_text('[core]\n')
+    def test_source_changes_require_a_new_reviewed_view(self):
         destination = self.root / 'view'
         bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset')
-        self.assertEqual(os.readlink(destination / nifti), str(target.resolve(strict=False)))
-        self.assertFalse((destination / '.git').exists())
-        self.assertEqual(bids_view.prepare_view(
-            self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True), 1)
-
-    def test_extension_adds_new_files_but_rejects_changed_or_removed_ones(self):
-        destination = self.root / 'view'
-        self.annex('sub-example/ses-000/anat/sub-example_ses-000_T1w.nii.gz', 'MD5E-s4--a.nii.gz')
-        bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset')
-        anat = self.source / 'sub-other/ses-000/anat'
-        anat.mkdir(parents=True)
-        self.annex('sub-other/ses-000/anat/sub-other_ses-000_T1w.nii.gz', 'MD5E-s4--b.nii.gz')
-        (self.source / 'participants.tsv').write_text('participant_id\tsex\nsub-example\tM\nsub-other\tF\n')
+        additional = self.source / 'sub-example/ses-000/anat/new_T1w.nii.gz'
+        additional.write_bytes(b'new source content')
         with self.assertRaisesRegex(ValueError, 'conflicts'):
             bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True)
-        self.assertEqual(bids_view.prepare_view(
-            self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True, extend=True), 2)
-        self.assertTrue((destination / 'sub-other/ses-000/anat/sub-other_ses-000_T1w.nii.gz').is_symlink())
-        self.assertIn('sub-other', (destination / 'participants.tsv').read_text())
-        self.assertEqual([entry.name for entry in destination.parent.iterdir() if entry.name.startswith('.')], [])
-        self.annex('sub-example/ses-000/anat/sub-example_ses-000_T1w.nii.gz', 'MD5E-s5--c.nii.gz')
-        with self.assertRaisesRegex(ValueError, 'need review: sub-example'):
-            bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True, extend=True)
+        additional.unlink()
+
+        original = self.source / 'sub-example/ses-000/anat/sub-example_ses-000_T1w.nii.gz'
+        original.rename(original.with_name('renamed_T1w.nii.gz'))
+        with self.assertRaisesRegex(ValueError, 'conflicts'):
+            bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True)
 
 
 if __name__ == '__main__':

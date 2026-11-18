@@ -41,7 +41,7 @@ rendered=$(render_chart '{"enabled": true}')
 assert_resources 'tag-only image remains supported for the app and all init containers' '
     [.[] | select(.kind == "Deployment" and .metadata.name == "loris") |
         .spec.template.spec | (.containers + .initContainers)[] | .image] |
-    length == 4 and all(.[]; . == "docker.io/scilus/loris:29.0.0")'
+    length == 4 and all(.[]; . == "docker.io/scilus/loris:29.0.0-chart0.5.0")'
 
 digest="sha256:$(printf '%064d' 1)"
 values=$(printf '{"enabled":true,"image":{"digest":"%s"},"loris":{"data":{"persistence":{"enabled":true}}},
@@ -52,7 +52,7 @@ assert_resources 'digest pins the app, bootstrap, discovery and ledger initializ
     [.[] | select((.kind == "Deployment" and .metadata.name == "loris") or .kind == "CronJob") |
         (if .kind == "CronJob" then .spec.jobTemplate.spec else .spec end) |
         .template.spec | (.containers + (.initContainers // []))[] | .image] |
-    length == 6 and all(.[]; . == $image)' --arg image "docker.io/scilus/loris:29.0.0@$digest"
+    length == 6 and all(.[]; . == $image)' --arg image "docker.io/scilus/loris:29.0.0-chart0.5.0@$digest"
 
 if render_chart '{"enabled":true,"image":{"digest":"sha256:invalid"}}' >/dev/null 2>&1; then
     printf 'FAIL: invalid image digest must not render\n' >&2
@@ -239,9 +239,11 @@ assert_resources 'each import-enabled site gets an independently scheduled disco
     ([.[] | select(.kind == "CronJob" and .metadata.name == "loris-bids-second")][0].spec |
         .schedule == "15 3 * * *" and .suspend == true)'
 
-assert_resources 'runtime profiles preserve dataset null and false overrides and include required helpers' '
+assert_resources 'runtime profiles preserve dataset overrides and exclude clone-specific helpers' '
     [.[] | select(.kind == "ConfigMap" and .metadata.name == "loris-bids-nandou-profile")][0].data |
-    has("bids_runtime.py") and has("bids_ephys.py") and has("bids-view.py") and has("bids-setup.py") and has("bids_migrate.py") and has("bids_clone_migrate.py") and
+    has("bids_runtime.py") and has("bids_ephys.py") and has("bids_previews.py") and
+    has("bids-view.py") and has("bids-setup.py") and has("bids_migrate.py") and
+    (has("bids_clone_migrate.py") | not) and
     (.["runtime.json"] | fromjson |
         .site.name == "nandou" and .site.siteAlias == "NAND" and
         .bidsImport.defaults.project == "Shared" and
@@ -293,53 +295,69 @@ for invalid in \
 done
 printf 'PASS: legacy keys and invalid site/dataset settings are rejected\n'
 
-clone_values='{"enabled":true,"loris":{"data":{"persistence":{"enabled":true}}},"bidsImport":{"enabled":true},
-    "sites":[{"name":"simsite","siteAlias":"SIM","enabled":true,"source":"clone",
+site_values='{"enabled":true,"loris":{"data":{"persistence":{"enabled":true}}},"bidsImport":{"enabled":true},
+    "sites":[{"name":"simsite","siteAlias":"SIM","enabled":true,"server":"nfs.example.internal",
               "bidsImport":{"enabled":true,"project":"P","projectAlias":"P"}}]}'
-rendered=$(render_chart "$clone_values")
-assert_resources 'clone sites mount a read-only data subPath in the portal and imports, without NFS volumes' '
-    ([.[] | select(.kind == "PersistentVolume" or .kind == "PersistentVolumeClaim") | .metadata.name] |
-        index("loris-bids-simsite") == null) and
-    ([.[] | select(.kind == "Deployment" and .metadata.name == "loris") | .spec.template.spec] | all(.[];
-        (.volumes | map(.name) | index("site-simsite") == null) and
-        (.containers[0].volumeMounts | any(.name == "loris-data" and .subPath == "re-move/clones/simsite" and
-            .mountPath == "/data/loris/data/assembly_bids/simsite" and .readOnly == true)) and
-        (.initContainers[0].command[2] | contains("chown www-data:www-data \"/data-state/re-move/clones\" \"/data-state/re-move/clones/simsite\"")))) and
-    ([.[] | select(.kind == "CronJob") | .spec.jobTemplate.spec.template.spec] | length == 1 and all(.[];
-        (.volumes | map(.name) | index("site-data") == null) and
-        (.containers[0].volumeMounts | any(.subPath == "re-move/clones/simsite" and .readOnly == true))))'
+rendered=$(render_chart "$site_values")
+assert_resources 'NFS site mounts remain read-only in portal and import Pods' '
+    ([.[] | select(.kind == "PersistentVolume" or .kind == "PersistentVolumeClaim") |
+        .metadata.name] | index("loris-bids-simsite") != null) and
+    ([.[] | select(.kind == "Deployment" and .metadata.name == "loris") |
+        .spec.template.spec] | length == 1 and all(.[];
+        .containers[0].volumeMounts | any(.mountPath == "/data/loris/data/assembly_bids/simsite" and
+            .readOnly == true))) and
+    ([.[] | select(.kind == "CronJob") | .spec.jobTemplate.spec.template.spec] |
+        length == 1 and all(.[];
+        .containers[0].volumeMounts | any(.mountPath == "/data/loris/data/assembly_bids/simsite" and
+            .readOnly == true)))'
 
 for invalid in \
  '{"enabled":true,"sites":[{"name":"simsite","enabled":true,"source":"rsync"}]}' \
  '{"enabled":true,"sites":[{"name":"nandou","enabled":true}]}' \
  '{"enabled":true,"sites":[{"name":"simsite","enabled":true,"source":"clone"}]}' \
- '{"enabled":true,"loris":{"data":{"persistence":{"enabled":true}}},"siteClones":{"subPath":"../outside"}}' \
- '{"enabled":true,"loris":{"data":{"persistence":{"enabled":true}}},"siteClones":{"subPath":"data/clones"}}' \
- '{"enabled":true,"loris":{"data":{"persistence":{"enabled":true}}},"siteClones":{"subPath":"/abs"}}' ; do
+ '{"enabled":true,"siteClones":{"subPath":"legacy-clones"}}' \
+ '{"enabled":true,"siteClones":{"cacheURL":"http://legacy-cache.example:8080"}}' ; do
     if render_chart "$invalid" >/dev/null 2>&1; then
         printf 'FAIL: invalid site source must not render: %s\n' "$invalid" >&2
         exit 1
     fi
     tests_passed=$((tests_passed + 1))
 done
-printf 'PASS: unknown sources, NFS sites without server, ephemeral clone data and unsafe clone paths are rejected\n'
+printf 'PASS: non-NFS sources and legacy clone settings are rejected\n'
 
 loris_env='[.[] | select(.kind == "Deployment" and .metadata.name == "loris") | .spec.template.spec.containers[] |
     select(.name == "loris") | .env | map({(.name): .value}) | add]'
-assert_resources 'without siteClones.cacheURL the portal does not ask for site content' "$loris_env |
-    length == 1 and (.[0] | has(\"RE_MOVE_CACHE_URL\") | not)"
-rendered=$(render_chart "$(printf '%s' "$clone_values" | yq -c '.siteClones.cacheURL = "http://re-move-cache.re-move-central.svc:8080"')")
-assert_resources 'siteClones.cacheURL enables on-demand site content in the portal' "$loris_env |
-    length == 1 and .[0].RE_MOVE_CACHE_URL == \"http://re-move-cache.re-move-central.svc:8080\" and
-    .[0].RE_MOVE_CLONE_ROOT == \"/data/loris/data/assembly_bids\""
-for invalid in '"ftp://cache"' '"http://cache/content"' '"http://cache:80 x"'; do
-    if render_chart "{\"enabled\": true, \"siteClones\": {\"cacheURL\": $invalid}}" >/dev/null 2>&1; then
-        printf 'FAIL: invalid siteClones.cacheURL %s must not render\n' "$invalid" >&2
+assert_resources 'without a provider the portal does not ask for remote content' "$loris_env |
+    length == 1 and (.[0] | has(\"LORIS_CONTENT_PROVIDER_URL\") | not) and
+    (.[0] | has(\"RE_MOVE_CACHE_URL\") | not) and (.[0] | has(\"RE_MOVE_CLONE_ROOT\") | not)"
+
+provider_values=$(printf '%s' "$site_values" |
+    yq -c '.contentProvider.url = "http://content-provider.example:8080"')
+rendered=$(render_chart "$provider_values")
+assert_resources 'provider URL is wired only to the portal and importer with generic paths' '
+    ([.[] | select(.kind == "Deployment" and .metadata.name == "loris") |
+        .spec.template.spec] | length == 1 and all(.[];
+        (.containers[] | select(.name == "loris") | .env |
+            map({(.name): .value}) | add) as $env |
+        $env.LORIS_CONTENT_PROVIDER_URL == "http://content-provider.example:8080" and
+        $env.LORIS_CONTENT_ROOT == "/data/loris/data/assembly_bids" and
+        ($env | has("RE_MOVE_CACHE_URL") | not) and ($env | has("RE_MOVE_CLONE_ROOT") | not) and
+        (.initContainers[0].command[2] | contains("/data-state/data/content-provider-chunks")))) and
+    ([.[] | select(.kind == "CronJob") | .spec.jobTemplate.spec.template.spec] |
+        length == 1 and all(.[];
+        (.containers[] | select(.name == "bids-import") | .env |
+            map({(.name): .value}) | add) as $env |
+        $env.LORIS_CONTENT_PROVIDER_URL == "http://content-provider.example:8080" and
+        $env.LORIS_CONTENT_ROOT == "/data/loris/data/assembly_bids" and
+        ($env | has("RE_MOVE_CACHE_URL") | not) and ($env | has("RE_MOVE_CLONE_ROOT") | not)))'
+for invalid in '"ftp://provider"' '"http://provider/v1"' '"http://provider:80 x"'; do
+    if render_chart "{\"enabled\": true, \"contentProvider\": {\"url\": $invalid}}" >/dev/null 2>&1; then
+        printf 'FAIL: invalid contentProvider.url %s must not render\n' "$invalid" >&2
         exit 1
     fi
 done
 tests_passed=$((tests_passed + 1))
-printf 'PASS: invalid siteClones.cacheURL values are rejected\n'
+printf 'PASS: provider URL validation and generic-only service wiring\n'
 
 rendered=$(render_chart '{"enabled": true}')
 assert_resources 'required LORIS modules are enforced by an unprivileged init container and guarded in the portal' '

@@ -37,10 +37,10 @@ spec:
             # Read by the patched Module Manager, which refuses to deactivate these.
             - name: LORIS_REQUIRED_MODULES
               value: {{ include "loris.requiredModules" . | quote }}
-            {{- with .Values.siteClones.cacheURL }}
-            - name: RE_MOVE_CACHE_URL
+            {{- with .Values.contentProvider.url }}
+            - name: LORIS_CONTENT_PROVIDER_URL
               value: {{ . | quote }}
-            - name: RE_MOVE_CLONE_ROOT
+            - name: LORIS_CONTENT_ROOT
               value: /data/loris/data/assembly_bids
             {{- end }}
           ports:
@@ -67,7 +67,7 @@ spec:
               mountPath: /data/loris
             {{- range .Values.sites }}
             {{- if .enabled }}
-            {{- include "loris.siteMount" (list . $ (printf "site-%s" .name)) | indent 12 }}
+{{ include "loris.siteMount" (list . $ (printf "site-%s" .name)) | indent 12 }}
             {{- end }}
             {{- end }}
       volumes:
@@ -89,7 +89,7 @@ spec:
           {{- end }}
         {{- range .Values.sites }}
         {{- if .enabled }}
-        {{- include "loris.siteVolume" (list . (printf "site-%s" .name)) | indent 8 }}
+{{ include "loris.siteVolume" (list . (printf "site-%s" .name)) | indent 8 }}
         {{- end }}
         {{- end }}
 ---

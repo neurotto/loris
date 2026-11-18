@@ -125,7 +125,7 @@ def configure(db, project_name, project_alias, site_name, site_alias, cohort_nam
         else:
             config.value = value
 
-    # The EEG viewer reads signal chunks; re-move-cache prepares them on first view.
+    # The EEG Browser reads signal chunks from each registered file's configured path.
     setting = db.scalars(select(DbConfigSetting).where(
         DbConfigSetting.name == 'useEEGBrowserVisualizationComponents')).one()
     config = db.scalars(select(DbConfig).where(DbConfig.setting_id == setting.id)).one_or_none()

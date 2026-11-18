@@ -4,9 +4,6 @@ Source files remain unchanged. Views contain ordinary directories, contained
 source-file symlinks, and a generated participants.tsv with LORIS registration
 columns. Retry validation distinguishes journaled importer archives from source
 content; these lightweight checks are not a full BIDS compliance validator.
-Locked git-annex files (symlinks into the dataset's .git/annex/objects) are
-linked by their annex object path whether or not content is present, so views of
-central clones can be built and compared after content was dropped.
 Filesystem arguments are pathlib.Path objects, and registration labels are strings.
 """
 
@@ -23,20 +20,6 @@ import tempfile
 
 ARTIFACTS = '.loris-import-artifacts.json'
 SKIPPED_ROOT_DIRECTORIES = ('derivatives', '.git')
-
-
-def annex_object(source, path):
-    """Return the dataset annex object a locked git-annex file links to, else None.
-
-    The target is computed lexically and may be absent when content was dropped.
-    Callers must already have rejected directory symlinks between source and path.
-    """
-    if not path.is_symlink():
-        return None
-
-    objects = source.resolve() / '.git' / 'annex' / 'objects'
-    target = Path(os.path.normpath(path.parent.resolve() / os.readlink(path)))
-    return target if target.is_relative_to(objects) else None
 
 
 def subject_identity(label, prefix=''):
@@ -93,7 +76,7 @@ def inspect_source(source, subject_prefix=''):
     return fields, rows, subjects
 
 
-def prepare_view(source, destination, project, site, cohort, reuse=False, extend=False, subject_prefix=''):
+def prepare_view(source, destination, project, site, cohort, reuse=False, subject_prefix=''):
     """Create or verify a no-copy registration view and return its subject count.
 
     Enrich generated participant rows without overwriting conflicting source
@@ -106,9 +89,6 @@ def prepare_view(source, destination, project, site, cohort, reuse=False, extend
     external archive reconciliation belongs to the EEG adapter. It never rewrites
     source files or blindly replaces existing registered metadata.
 
-    extend=True (versioned sources) additionally accepts source additions: missing
-    directories and links are added and participants.tsv is regenerated. Removed
-    or changed source files still conflict, because registered paths would break.
     """
     fields, rows, subjects = inspect_source(source, subject_prefix)
     additions = {'project': project, 'site': site, 'cohort': cohort}
@@ -184,14 +164,11 @@ def prepare_view(source, destination, project, site, cohort, reuse=False, extend
 
             current, wanted = manifest(destination), manifest(expected)
             if current != wanted:
-                changed = sorted(key for key, value in current.items()
-                                 if key != 'participants.tsv' and wanted.get(key) != value)
-                if not extend or changed:
-                    raise ValueError('Existing import view conflicts with source or registration metadata'
-                                     + ('; removed or changed source files need review: ' + ', '.join(changed[:5])
-                                        if extend else ''))
-
-                _extend_view(expected, destination, current, wanted)
+                changed = sorted(set(current) ^ set(wanted) | {
+                    key for key in current.keys() & wanted.keys() if current[key] != wanted[key]
+                })
+                raise ValueError('Existing import view conflicts with source or registration metadata'
+                                 + ('; changed entries need review: ' + ', '.join(changed[:5]) if changed else ''))
 
         return len(subjects)
 
@@ -236,14 +213,6 @@ def _write_view(source, destination, fields, rows):
                 continue
 
             source_file = source_dir / name
-            annexed = annex_object(source, source_file)
-            if annexed is not None:
-                if annexed.exists() and not annexed.is_file():
-                    raise ValueError('Source contains a non-regular annexed file')
-
-                (target_dir / name).symlink_to(annexed)
-                continue
-
             resolved = source_file.resolve(strict=True)
             if not resolved.is_relative_to(source.resolve()):
                 raise ValueError('Source file symlink escapes the approved BIDS root')
@@ -257,32 +226,6 @@ def _write_view(source, destination, fields, rows):
         writer = csv.DictWriter(handle, fieldnames=fields, delimiter='\t')
         writer.writeheader()
         writer.writerows(rows)
-
-
-def _extend_view(expected, destination, current, wanted):
-    """Add entries of a verified superset view and replace generated participants.
-
-    Parents sort before children, so directories exist before their links.
-    participants.tsv is replaced atomically from a sibling temporary file.
-    """
-    for relative in sorted(set(wanted) - set(current)):
-        kind = wanted[relative][0]
-        if kind == 'directory':
-            (destination / relative).mkdir()
-        elif kind == 'link':
-            (destination / relative).symlink_to(wanted[relative][1])
-
-    if current.get('participants.tsv') != wanted.get('participants.tsv'):
-        handle, temporary = tempfile.mkstemp(prefix='.participants-', dir=destination.parent)
-        try:
-            os.chmod(temporary, 0o644)
-            with os.fdopen(handle, 'wb') as output:
-                output.write((expected / 'participants.tsv').read_bytes())
-
-            os.replace(temporary, destination / 'participants.tsv')
-        finally:
-            if os.path.lexists(temporary):
-                os.unlink(temporary)
 
 
 def main():

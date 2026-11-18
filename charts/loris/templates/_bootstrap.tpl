@@ -11,18 +11,12 @@
         touch /project-state/.loris-seeded
       fi
       mkdir -p /data-state/data/assembly_bids
-      {{- if .Values.siteClones.cacheURL }}
-      # EEG signal chunks the content cache prepares on first view.
-      mkdir -p /data-state/data/re-move-chunks
+      {{- if .Values.contentProvider.url }}
+      mkdir -p /data-state/data/content-provider-chunks
       {{- end }}
       {{- range .Values.sites }}
       {{- if .enabled }}
       mkdir -p /data-state/data/assembly_bids/{{ .name }}
-      {{- if eq (include "loris.siteSource" .) "clone" }}
-      # Clone root for the external sync job; not recursive, annexed content keeps its own modes.
-      mkdir -p {{ printf "/data-state/%s/%s" $.Values.siteClones.subPath .name | quote }}
-      chown www-data:www-data {{ printf "/data-state/%s" $.Values.siteClones.subPath | quote }} {{ printf "/data-state/%s/%s" $.Values.siteClones.subPath .name | quote }}
-      {{- end }}
       {{- end }}
       {{- end }}
       chown -R www-data:www-data /project-state /data-state/data

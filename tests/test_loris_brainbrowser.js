@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..');
 const relative = 'modules/brainbrowser/js/brainbrowser.loris.js';
 const original = execFileSync('docker', [
   'run', '--rm', '--network', 'none', '--entrypoint', 'cat',
-  process.env.LORIS_IMAGE || 'scilus/loris:29.0.0',
+  process.env.LORIS_IMAGE || 'scilus/loris:29.0.0-chart0.5.0',
   '/var/www/loris/' + relative,
 ], {encoding: 'utf8'});
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'loris-brainbrowser-'));
@@ -18,16 +18,20 @@ let patched;
 try {
   fs.mkdirSync(path.dirname(path.join(temporary, relative)), {recursive: true});
   fs.writeFileSync(path.join(temporary, relative), original);
-  // Released images ship patched files; each must then be exactly its patch result.
-  for (const name of ['brainbrowser-react-mount.patch', 're-move-annex-content.patch']) {
+  // Built images ship patched files; each must then be exactly its patch result.
+  const patches = [
+    'brainbrowser-react-mount.patch',
+    'content-provider.patch',
+  ];
+  for (const name of [...patches].reverse()) {
     const patch = path.join(root, 'charts/loris/image', name);
-    const args = ['--include=' + relative, patch];
-    try {
-      execFileSync('git', ['apply', '--check', ...args], {cwd: temporary, stdio: 'ignore'});
-      execFileSync('git', ['apply', ...args], {cwd: temporary});
-    } catch {
-      execFileSync('git', ['apply', '--reverse', '--check', ...args], {cwd: temporary});
-    }
+    execFileSync('git', ['apply', '--reverse', '--check', '--include=' + relative, patch], {cwd: temporary});
+    execFileSync('git', ['apply', '--reverse', '--include=' + relative, patch], {cwd: temporary});
+  }
+  for (const name of patches) {
+    const patch = path.join(root, 'charts/loris/image', name);
+    execFileSync('git', ['apply', '--check', '--include=' + relative, patch], {cwd: temporary});
+    execFileSync('git', ['apply', '--include=' + relative, patch], {cwd: temporary});
   }
   patched = fs.readFileSync(path.join(temporary, relative), 'utf8');
 } finally {
@@ -99,8 +103,14 @@ test('reports a missing React root rather than silently waiting', () => {
   assert.equal(state.observer, null);
 });
 
-function viewerEnvironment(responses) {
-  const state = {loading: [], volumes: null, timeouts: []};
+function viewerEnvironment(responses, options = {}) {
+  const state = {
+    loading: [],
+    volumes: null,
+    timeouts: [],
+    fetches: 0,
+    pagehide: null,
+  };
   const chain = new Proxy(function() {}, {
     get(target, name) {
       if (name === 'val') return () => '256';
@@ -117,7 +127,12 @@ function viewerEnvironment(responses) {
     loadVolumes(options) { state.volumes = options.volumes; },
   };
   const context = {
-    window: {location: {search: '?minc_id=[7]&file_url=[]'}, addEventListener() {}},
+    window: {
+      location: {search: '?minc_id=[7]&file_url=[]'},
+      addEventListener(name, callback) {
+        if (name === 'pagehide') state.pagehide = callback;
+      },
+    },
     document: {getElementById: (id) => id === 'brainbrowser' ? {} : null},
     $(value) {
       if (typeof value === 'function') {
@@ -125,8 +140,14 @@ function viewerEnvironment(responses) {
       }
       return chain;
     },
-    setTimeout(callback, delay) { state.timeouts.push(delay); callback(); },
+    setTimeout(callback, delay) {
+      state.timeouts.push(delay);
+      if (!options.deferTimeouts) callback();
+      return state.timeouts.length;
+    },
+    clearTimeout() {},
     fetch() {
+      state.fetches++;
       const [status, body, retry] = responses.shift();
       return Promise.resolve({
         status,
@@ -134,6 +155,7 @@ function viewerEnvironment(responses) {
         json: () => Promise.resolve(body),
       });
     },
+    AbortController,
     BrainBrowser: {
       VolumeViewer: {start(id, callback) { return callback(viewer); }},
       events: {addEventListener() {}},
@@ -148,17 +170,33 @@ function viewerEnvironment(responses) {
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 test('retries while a site image is fetched, then loads it', async () => {
-  const fetching = {state: 'fetching', error: 'Fetching the images from site S.'};
+  const fetching = {state: 'pending', error: 'Fetching the images from site S.'};
   const state = viewerEnvironment([
-    [503, fetching, '3'],
+    [503, fetching, '999'],
     [503, fetching, null],
     [200, [{type: 'nifti1', URL: '/a.nii.gz', Filename: 'a.nii.gz'}]],
   ]);
   for (let i = 0; i < 10 && !state.volumes; i++) await settle();
-  assert.deepEqual(state.timeouts, [3000, 5000]);
+  assert.deepEqual(state.timeouts, [60000, 5000]);
   assert.match(state.loading[0], /^Fetching the images from site S\. \(\d+ s\)$/);
   assert.equal(state.volumes.length, 1);
   assert.equal(state.volumes[0].nii_url, '/a.nii.gz');
+});
+
+test('cancels the pending image retry when the page is left', async () => {
+  const state = viewerEnvironment([
+    [503, {state: 'pending', error: 'Fetching the images from site S.'}, '3'],
+    [200, []],
+  ], {deferTimeouts: true});
+  for (let i = 0; i < 10 && state.timeouts.length === 0; i++) await settle();
+  assert.equal(state.fetches, 1);
+  assert.ok(state.pagehide);
+  state.pagehide();
+  for (let i = 0; i < 10 && !state.loading.some(message => /cancelled/i.test(message)); i++) {
+    await settle();
+  }
+  assert.equal(state.fetches, 1);
+  assert.match(state.loading.at(-1), /cancelled/i);
 });
 
 test('reports an unavailable site image instead of retrying', async () => {

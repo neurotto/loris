@@ -6,7 +6,7 @@ tolerations: []
 
 image:
   repository: docker.io/scilus/loris
-  tag: 29.0.0
+  tag: 29.0.0-chart0.5.0
   digest: ""
   pullPolicy: IfNotPresent
 
@@ -86,18 +86,13 @@ ingress:
 #     source: nfs             nfs (default): NFS export at server:nfsPort/bids (templates/site-volumes.yaml)
 #     server: nfs.example.org
 #     nfsPort: 20490
-#     source: clone           clone: central git-annex clone at <siteClones.subPath>/<name> on the LORIS data PVC,
-#                             kept by an external sync job. Additive dataset updates are re-imported.
 #     bidsImport: {...}
 sites: []
 
-# Clone-sourced sites (sites[].source: clone) live below this directory of the LORIS data PVC.
-siteClones:
-  subPath: re-move/clones
-  # URL of the RE-MOVE content cache (re-move-cache). When set, images of clone-sourced sites whose
-  # git-annex content is not present are fetched on demand: the API and BrainBrowser answer
-  # 503 + Retry-After while the cache fetches them from the site, instead of 404. Empty disables it.
-  cacheURL: ""
+# Optional provider-neutral service for asynchronously prepared site content.
+contentProvider:
+  # Base URL for the HTTP content availability contract; empty disables it.
+  url: ""
 
 bidsImport:
   enabled: false
