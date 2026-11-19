@@ -50,14 +50,30 @@
 {{- end -}}
 {{- $_ := set $names .name true -}}
 {{- $source := include "loris.siteSource" . -}}
-{{- if ne $source "nfs" }}{{ fail "sites[].source must be nfs; other storage must be mounted externally" }}{{ end -}}
+{{- if not (has $source (list "nfs" "pvc")) }}{{ fail "sites[].source must be nfs or pvc" }}{{ end -}}
+{{- if eq $source "nfs" -}}
 {{- if and .enabled (empty .server) }}{{ fail (printf "NFS site %s requires server" .name) }}{{ end -}}
+{{- if or (hasKey . "claimName") (hasKey . "subPath") }}{{ fail (printf "NFS site %s must not set claimName or subPath" .name) }}{{ end -}}
+{{- else -}}
+{{- if and .enabled (not (regexMatch "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$" (toString (.claimName | default "")))) -}}
+{{- fail (printf "PVC site %s requires claimName of an existing claim" .name) -}}
+{{- end -}}
+{{- with .subPath -}}
+{{- $sub := toString . -}}
+{{- if or (hasPrefix "/" $sub) (has ".." (splitList "/" $sub)) (contains "$(" $sub) -}}
+{{- fail "PVC site subPath must be relative without .. or variable expansion" -}}
+{{- end -}}
+{{- end -}}
+{{- if or (hasKey . "server") (hasKey . "nfsPort") (hasKey . "capacity") }}{{ fail (printf "PVC site %s must not set NFS fields (server, nfsPort, capacity)" .name) }}{{ end -}}
+{{- end -}}
 {{- $import := .bidsImport | default dict -}}
 {{- range $key, $_ := $import -}}
-{{- if not (has $key (concat $fields (list "enabled" "schedule" "timeZone" "suspend" "datasets"))) -}}
+{{- if not (has $key (concat $fields (list "enabled" "schedule" "timeZone" "suspend" "datasets" "symlinkedContent" "updates"))) -}}
 {{- fail (printf "Unknown site bidsImport.%s; use name/siteAlias, not centre/centreAlias" $key) -}}
 {{- end -}}
 {{- end -}}
+{{- if and (hasKey $import "symlinkedContent") (not (has $import.symlinkedContent (list "resolve" "identity"))) }}{{ fail "sites[].bidsImport.symlinkedContent must be resolve or identity" }}{{ end -}}
+{{- if and (hasKey $import "updates") (not (has $import.updates (list "reject" "additive"))) }}{{ fail "sites[].bidsImport.updates must be reject or additive" }}{{ end -}}
 {{- if $import.enabled -}}
 {{- if not .enabled }}{{ fail "An import-enabled site must also have its site mount enabled" }}{{ end -}}
 {{- if or (not (kindIs "string" .siteAlias)) (not (regexMatch "^.{1,4}$" .siteAlias)) -}}
@@ -75,15 +91,19 @@
 {{- fail "Dataset override keys must be immediate folder names" -}}
 {{- end -}}
 {{- range $key, $_ := $override -}}
-{{- if not (has $key (concat $fields (list "enabled"))) }}{{ fail (printf "Unknown dataset override %s" $key) }}{{ end -}}
+{{- if not (has $key (concat $fields (list "enabled" "acceptFingerprint"))) }}{{ fail (printf "Unknown dataset override %s" $key) }}{{ end -}}
 {{- end -}}
-{{- $all = append $all $override -}}
+{{- if hasKey $override "acceptFingerprint" -}}
+{{- if not (regexMatch "^[0-9a-f]{64}$" (toString $override.acceptFingerprint)) }}{{ fail "sites[].bidsImport.datasets.*.acceptFingerprint must be a 64-character lowercase hex fingerprint" }}{{ end -}}
+{{- if ne ($import.updates | default "reject") "additive" }}{{ fail "sites[].bidsImport.datasets.*.acceptFingerprint requires bidsImport.updates: additive" }}{{ end -}}
+{{- end -}}
+{{- $all = append $all (omit $override "acceptFingerprint") -}}
 {{- end -}}
 {{- range $settings := $all -}}
 {{- include "loris.bids.settings" $settings -}}
 {{- end -}}
 {{- end -}}
-{{- if hasKey .Values "siteClones" }}{{ fail "siteClones was removed; use NFS site sources, with contentProvider.url only for optional provider-neutral on-demand content" }}{{ end -}}
+{{- if hasKey .Values "siteClones" }}{{ fail "siteClones was removed; use sites[].source nfs or pvc (claimName/subPath), with contentProvider.url only for optional provider-neutral on-demand content" }}{{ end -}}
 {{- with .Values.contentProvider.url -}}
 {{- if not (regexMatch "^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$" (toString .)) }}{{ fail "contentProvider.url must be an http(s) base URL without a path" }}{{ end -}}
 {{- end -}}

@@ -4,6 +4,10 @@ Source files remain unchanged. Views contain ordinary directories, contained
 source-file symlinks, and a generated participants.tsv with LORIS registration
 columns. Retry validation distinguishes journaled importer archives from source
 content; these lightweight checks are not a full BIDS compliance validator.
+With symlink_identity, in-dataset file symlinks are accepted whether or not their
+target is present and are linked by source path, so views of sources that drop
+content (for example content-addressed stores) stay stable when content comes and
+goes, and on-demand providers receive the dataset path rather than a store path.
 Filesystem arguments are pathlib.Path objects, and registration labels are strings.
 """
 
@@ -20,6 +24,40 @@ import tempfile
 
 ARTIFACTS = '.loris-import-artifacts.json'
 SKIPPED_ROOT_DIRECTORIES = ('derivatives', '.git')
+
+
+def contained_link(source, path):
+    """Return the lexical target of a file symlink inside source, else None.
+
+    The target may be absent. It must not traverse further symlinks, so its path
+    alone identifies it; present targets must be regular files. Callers must
+    already have rejected directory symlinks between source and path.
+    """
+    if not path.is_symlink():
+        return None
+
+    root = source.resolve()
+    target = Path(os.path.normpath(path.parent.resolve() / os.readlink(path)))
+    if not target.is_relative_to(root):
+        raise ValueError('Source file symlink escapes the approved BIDS root')
+
+    # Non-strict resolution follows every existing link, even when the final file is absent.
+    if target.resolve() != target:
+        raise ValueError('Source file symlink target must not traverse further symlinks')
+
+    if target.exists() and not target.is_file():
+        raise ValueError('Source contains a non-regular file')
+
+    return target
+
+
+def final_target(path, hops=16):
+    """Follow a symlink chain lexically, without requiring the final target to exist."""
+    for _ in range(hops):
+        if not path.is_symlink():
+            return path
+        path = Path(os.path.normpath(path.parent.resolve() / os.readlink(path)))
+    raise ValueError('Too many levels of symbolic links')
 
 
 def subject_identity(label, prefix=''):
@@ -76,7 +114,8 @@ def inspect_source(source, subject_prefix=''):
     return fields, rows, subjects
 
 
-def prepare_view(source, destination, project, site, cohort, reuse=False, subject_prefix=''):
+def prepare_view(source, destination, project, site, cohort, reuse=False, subject_prefix='',
+                 symlink_identity=False, additive=False):
     """Create or verify a no-copy registration view and return its subject count.
 
     Enrich generated participant rows without overwriting conflicting source
@@ -89,6 +128,9 @@ def prepare_view(source, destination, project, site, cohort, reuse=False, subjec
     external archive reconciliation belongs to the EEG adapter. It never rewrites
     source files or blindly replaces existing registered metadata.
 
+    additive=True additionally accepts source additions on reuse: missing
+    directories and links are added and participants.tsv is regenerated. Removed
+    or changed entries still conflict, because registered paths would break.
     """
     fields, rows, subjects = inspect_source(source, subject_prefix)
     additions = {'project': project, 'site': site, 'cohort': cohort}
@@ -141,7 +183,8 @@ def prepare_view(source, destination, project, site, cohort, reuse=False, subjec
 
         with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
             expected = Path(temporary) / 'expected'
-            prepare_view(source, expected, project, site, cohort, subject_prefix=subject_prefix)
+            prepare_view(source, expected, project, site, cohort, subject_prefix=subject_prefix,
+                         symlink_identity=symlink_identity)
 
             def manifest(root):
                 """Describe comparable view entries, excluding owned generated artifacts."""
@@ -163,19 +206,34 @@ def prepare_view(source, destination, project, site, cohort, reuse=False, subjec
                 return entries
 
             current, wanted = manifest(destination), manifest(expected)
+            # Upgrade links that already reach the same in-dataset target to the source-path form.
+            relinked = [key for key in current.keys() & wanted.keys()
+                        if symlink_identity and current[key] != wanted[key]
+                        and current[key][0] == wanted[key][0] == 'link'
+                        and final_target(Path(current[key][1])) == final_target(Path(wanted[key][1]))]
+            current.update({key: wanted[key] for key in relinked})
             if current != wanted:
-                changed = sorted(set(current) ^ set(wanted) | {
-                    key for key in current.keys() & wanted.keys() if current[key] != wanted[key]
-                })
-                raise ValueError('Existing import view conflicts with source or registration metadata'
-                                 + ('; changed entries need review: ' + ', '.join(changed[:5]) if changed else ''))
+                changed = sorted(key for key in current if key != 'participants.tsv' and wanted.get(key) != current[key])
+                if not additive or changed:
+                    changed = changed if additive else sorted(set(current) ^ set(wanted) | {
+                        key for key in current.keys() & wanted.keys() if current[key] != wanted[key]
+                    })
+                    raise ValueError('Existing import view conflicts with source or registration metadata'
+                                     + ('; changed entries need review: ' + ', '.join(changed[:5]) if changed else ''))
+
+                _extend_view(expected, destination, current, wanted)
+
+            for key in relinked:
+                temporary = destination / (key + '.relink')
+                temporary.symlink_to(wanted[key][1])
+                os.replace(temporary, destination / key)
 
         return len(subjects)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix='.bids-view-', dir=destination.parent))
     try:
-        _write_view(source, temporary, fields, rows)
+        _write_view(source, temporary, fields, rows, symlink_identity)
         temporary.rename(destination)
     finally:
         if temporary.exists():
@@ -184,7 +242,7 @@ def prepare_view(source, destination, project, site, cohort, reuse=False, subjec
     return len(subjects)
 
 
-def _write_view(source, destination, fields, rows):
+def _write_view(source, destination, fields, rows, symlink_identity=False):
     """Populate a staging view with source links and enriched participant rows.
 
     fields/rows must already be validated and enriched by prepare_view. Refuse
@@ -213,6 +271,11 @@ def _write_view(source, destination, fields, rows):
                 continue
 
             source_file = source_dir / name
+            if symlink_identity and source_file.is_symlink():
+                contained_link(source, source_file)
+                (target_dir / name).symlink_to(source_file.absolute())
+                continue
+
             resolved = source_file.resolve(strict=True)
             if not resolved.is_relative_to(source.resolve()):
                 raise ValueError('Source file symlink escapes the approved BIDS root')
@@ -226,6 +289,32 @@ def _write_view(source, destination, fields, rows):
         writer = csv.DictWriter(handle, fieldnames=fields, delimiter='\t')
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _extend_view(expected, destination, current, wanted):
+    """Add entries of a verified superset view and replace generated participants.
+
+    Parents sort before children, so directories exist before their links.
+    participants.tsv is replaced atomically from a sibling temporary file.
+    """
+    for relative in sorted(set(wanted) - set(current)):
+        kind = wanted[relative][0]
+        if kind == 'directory':
+            (destination / relative).mkdir()
+        elif kind == 'link':
+            (destination / relative).symlink_to(wanted[relative][1])
+
+    if current.get('participants.tsv') != wanted.get('participants.tsv'):
+        handle, temporary = tempfile.mkstemp(prefix='.participants-', dir=destination.parent)
+        try:
+            os.chmod(temporary, 0o644)
+            with os.fdopen(handle, 'wb') as output:
+                output.write((expected / 'participants.tsv').read_bytes())
+
+            os.replace(temporary, destination / 'participants.tsv')
+        finally:
+            if os.path.lexists(temporary):
+                os.unlink(temporary)
 
 
 def main():

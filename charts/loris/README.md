@@ -22,7 +22,7 @@ Chart version: **0.5.0**.
   configuration setup.
 - Configurable persistent storage or existing claims for all writable state.
 - Optional ingress at the root of a dedicated hostname.
-- Optional read-only BIDS site mounts from NFSv4.1 exports.
+- Optional read-only BIDS site mounts from NFSv4.1 exports or existing claims.
 - Optional scheduled dataset discovery and ledger-backed import Jobs using the
   LORIS-MRI `--no-copy` importer.
 - A database ingress NetworkPolicy and Argo CD sync-wave annotations.
@@ -47,8 +47,10 @@ Chart version: **0.5.0**.
   UID/GID 33 (`www-data`).
 - For ingress: an ingress controller, DNS, and a TLS Secret or certificate
   provisioning mechanism.
-- For site mounts: NFS client support on eligible Kubernetes nodes, network access
-  from those nodes to each server, and permission to create cluster-scoped PVs.
+- For NFS site mounts: NFS client support on eligible Kubernetes nodes, network
+  access from those nodes to each server, and permission to create cluster-scoped
+  PVs. PVC site mounts only need an existing claim the portal and import Pods can
+  mount.
 - A CNI that enforces NetworkPolicy for the database policy to take effect.
 
 Resource names such as `loris` and `loris-mariadb` are fixed rather than derived
@@ -225,6 +227,15 @@ the portal and import Pods at the same path:
 
 - `source: nfs` (default): an existing NFSv4.1 export. The chart creates the PV/PVC;
   it does **not** deploy an NFS server or configure a site's firewall.
+- `source: pvc`: a directory on an existing PersistentVolumeClaim in the release
+  namespace, for example a copy of site data that another workload synchronizes
+  inside the cluster. The chart creates no PV/PVC for it and never writes to it.
+
+`source: pvc` lets you keep the central cluster from opening connections into site
+networks: sites push data to a service you operate, which writes a copy to a
+claim that LORIS mounts read-only. Content that is not yet present (for example a
+dangling symlink in a partial copy) can be fetched on demand through
+[`contentProvider.url`](#provider-neutral-on-demand-content).
 
 Each enabled site is mounted at:
 
@@ -245,16 +256,26 @@ sites:
     siteAlias: EX
     bidsImport:
       enabled: false
+  - name: synced-site
+    enabled: true
+    source: pvc
+    claimName: site-copies
+    subPath: sites/synced-site
+    siteAlias: SYNC
 ```
+
+Both forms expose the same layout: dataset folders directly below the site root.
 
 | Site field     | Default                            | Description                                                                                               |
 | -------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `name`       | Required                           | Unique lowercase DNS label, at most 40 characters; also used for the LORIS site name and mount directory. |
 | `enabled`    | Set explicitly                     | Mount the site in the portal (and create its PV/PVC for NFS sources).                                     |
-| `source`     | `nfs`                              | `nfs`.                                                                                                    |
-| `server`     | Required for enabled NFS sites     | NFS server address reachable from eligible cluster nodes.                                                 |
-| `nfsPort`    | `20490`                          | NFS TCP port.                                                                                             |
-| `capacity`   | `1Ti`                            | Declared PV/PVC capacity, not an enforced NFS quota.                                                      |
+| `source`     | `nfs`                              | `nfs` or `pvc`.                                                                                           |
+| `server`     | Required for enabled NFS sites     | NFS server address reachable from eligible cluster nodes. NFS only.                                       |
+| `nfsPort`    | `20490`                          | NFS TCP port. NFS only.                                                                                   |
+| `capacity`   | `1Ti`                            | Declared PV/PVC capacity, not an enforced NFS quota. NFS only.                                            |
+| `claimName`  | Required for enabled PVC sites     | Existing claim in the release namespace. PVC only.                                                        |
+| `subPath`    | Claim root                         | Relative directory inside the claim, without `..`. PVC only.                                              |
 | `siteAlias`  | Required for imports               | Unique 1–4 character LORIS site alias.                                                                   |
 | `bidsImport` | Disabled unless enabled explicitly | Site-specific discovery and registration settings.                                                        |
 
@@ -264,6 +285,12 @@ grant UID/GID 33, or the server's mapped identity, read and directory-traversal
 access. Verify node-to-server reachability and read-only behavior before enabling
 the site. An unavailable NFS mount can prevent the portal Pod from starting;
 soft-mount read failures also need operational monitoring.
+
+For PVC sites, the claim's access mode and scheduling must let the portal and
+import Pods mount it alongside its writer; the mount is read-only in LORIS
+containers, so write protection of the source is the writer's responsibility.
+A claim may be the LORIS data claim itself, with `subPath` pointing outside the
+directories LORIS writes.
 
 Network isolation, source authorization, and encrypted transport must be
 provided separately. The chart does not configure NFS transport encryption or
@@ -318,23 +345,42 @@ its site and dataset. It contains no provider-specific identifiers.
 Chart 0.5.0 removes `sites[].source: clone`, `siteClones.*`, the legacy
 clone-cache image patch, clone-specific BIDS import behavior, and the bundled
 maintenance tools for those integrations. Existing values using these settings
-must not be carried forward unchanged: sites now require an NFSv4.1 source, and
-the Helm templates reject `source: clone` and `siteClones`.
+must not be carried forward unchanged: the Helm templates reject
+`source: clone` and `siteClones`.
 
-Before upgrading, pause site discovery and any external clone synchronization.
-Back up the LORIS database and persistent data, then provision and verify the
-replacement NFS export with the same site/dataset layout and read-only access.
-Remove `siteClones` and set each site to `source: nfs` with its NFS server
-configuration. `contentProvider.url` is optional and only implements the
-provider-neutral on-demand content contract; it does not provide site storage
-or migrate clone data.
+Before upgrading, pause site discovery and any external clone synchronization,
+and back up the LORIS database and persistent data. Then choose one of:
+
+- **Keep the in-cluster copies:** set each former clone site to `source: pvc`
+  with the claim that holds the copies and `subPath: <siteClones.subPath>/<site>`
+  (for example `claimName: loris-data`, `subPath: re-move/clones/<site>` with the
+  former defaults). The mount path is unchanged and no site network access is
+  added. To keep on-demand fetching of absent content, point
+  `contentProvider.url` at a service implementing the provider contract instead
+  of `siteClones.cacheURL`. If the copies keep file contents behind in-dataset
+  symlinks that may be dropped, set `bidsImport.symlinkedContent: identity`;
+  if they grow through synchronization, set `bidsImport.updates: additive`.
+- **Switch to NFS:** provision and verify a replacement NFS export with the same
+  site/dataset layout and read-only access, then set `source: nfs` with its
+  server configuration.
+
+`contentProvider.url` only implements the provider-neutral on-demand content
+contract; it does not provide site storage or migrate clone data.
 
 Existing import views may contain links into clone-specific object paths, and
 their registrations may refer to those paths. The chart does not migrate those
 database records or views. Keep the prior deployment and clone data available
 until you have a separately reviewed migration or restore strategy. Source
-fingerprints now hash file paths and contents; changed or unavailable datasets
-are rejected for review rather than automatically extended or re-imported.
+fingerprints now hash file paths and either contents or, with
+`symlinkedContent: identity`, symlink targets. The first discovery after the
+upgrade therefore sees a changed fingerprint: it is rejected for review unless
+`updates: additive` is set, in which case the dataset is re-armed, already
+registered files are skipped, and legacy view links to the same final file are
+upgraded in place. Legacy links that reach another file are rejected. Because
+no per-file digests exist yet, each such dataset is first rejected with its new
+fingerprint; verify that its imported files are unchanged before setting
+`acceptFingerprint` as described in
+[Symlinked content and additive updates](#symlinked-content-and-additive-updates).
 Rollback requires restoring the prior chart version, values, image and clone
 storage together. Do not remove the old storage until the upgraded portal and
 all affected registered files have been verified.
@@ -494,7 +540,8 @@ Already completed modes are skipped.
 
 Dataset identity is the site/folder pair. Changes to dataset names,
 registration identity, or source fingerprints are rejected rather than silently
-reimported; investigate and plan an explicit migration. Imports commit
+reimported, unless a site opts in to additive updates (below); investigate and
+plan an explicit migration. Imports commit
 incrementally: a failed attempt does not roll back previously registered scans.
 Fingerprinting reads the included dataset contents, even during discovery;
 account for source size and network throughput when choosing the schedule and
@@ -510,12 +557,62 @@ Job deadline.
 | `bidsImport.ttlSecondsAfterFinished` | `604800`      | Finished Job retention in seconds (seven days).           |
 
 Sites can override `schedule`, `timeZone`, and `suspend` inside their
-`bidsImport` section. Dataset overrides can set registration fields and `enabled`,
-but not scheduling fields. Jobs use `backoffLimit: 0`; the discovery CronJob uses
+`bidsImport` section. Dataset overrides can set registration fields, `enabled`, and
+`acceptFingerprint` (below), but not scheduling fields. Jobs use `backoffLimit: 0`; the discovery CronJob uses
 `concurrencyPolicy: Forbid`, retains one successful and three failed discovery
 Jobs, and uses a dedicated ServiceAccount with namespace-scoped Job/ConfigMap
 permissions. Its ledger initializer uses the database root credential; workers
 have application credentials and no mounted service-account token.
+
+### Symlinked content and additive updates
+
+Two site-level `bidsImport` options support sources whose files are symlinks
+into a content store inside the dataset and whose datasets grow over time. Both
+are opt-in and cannot be set per dataset.
+
+| Site value | Default | Description |
+| ---------- | ------- | ----------- |
+| `sites[].bidsImport.symlinkedContent` | `resolve` | `resolve` follows file symlinks and requires their content. `identity` fingerprints a file symlink by its target path and links import views to the source path, so content may be absent. |
+| `sites[].bidsImport.updates` | `reject` | `reject` sends changed fingerprints to review. `additive` lets an idle dataset re-import after files are added; changed or removed imported files are still rejected. |
+
+With `identity`, a symlink target must stay inside the dataset and must not
+pass through further symlinks, including symlinked directories; if the target
+exists, it must be a regular file. A store that replaces file contents without
+changing the target path is not detected. Pair absent content with
+`contentProvider.url` so viewers can request it. New acquisitions still need
+their content present when they are imported; files already registered are not
+read again. Metadata such as `dataset_description.json`, `participants.tsv`, and
+sidecars must always be present.
+
+With `additive`, the import ledger records a digest for every dataset file
+(the content, or the symlink target with `identity`). A changed fingerprint
+re-arms the dataset only if every recorded file except `participants.tsv` is
+still present and unchanged; otherwise discovery rejects it for review. The
+re-arm resets completed modes and sets the status to `updated`, and the next
+discovery creates an import attempt that registers only the additions. An
+active import still blocks the update. Import views are extended in place;
+existing view links that already point to the same final file are rewritten to
+the current link form.
+
+Datasets enrolled before `additive` was enabled, or by an earlier chart
+version, receive their digests at the first discovery where their fingerprint
+is unchanged. If the fingerprint has already changed by then, discovery
+rejects the dataset and reports its new fingerprint. After verifying that the
+files already imported are unchanged, accept exactly that state:
+
+```yaml
+sites:
+  - name: example-site
+    bidsImport:
+      updates: additive
+      datasets:
+        example-dataset:
+          acceptFingerprint: <64-character fingerprint from the discovery error>
+```
+
+The value only applies while no digests are recorded and only to that exact
+fingerprint; any later change needs no new value and is checked against the
+recorded digests. It requires `updates: additive`.
 
 ## Configuration reference
 

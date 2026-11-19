@@ -1,6 +1,6 @@
 {{- if .Values.enabled }}
 {{- range .Values.sites }}
-{{- if .enabled }}
+{{- if and .enabled (eq (include "loris.siteSource" .) "nfs") }}
 ---
 apiVersion: v1
 kind: PersistentVolume

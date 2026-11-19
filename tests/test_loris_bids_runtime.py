@@ -273,6 +273,75 @@ class RuntimeTests(unittest.TestCase):
             self.enroll()
         self.assertEqual(runtime.get_dataset(self.engine, identity)['attempt'], 0)
 
+    def test_symlink_identity_fingerprint_ignores_content_presence(self):
+        objects = self.source / '.git/objects/KEY'
+        objects.mkdir(parents=True)
+        (objects / 'KEY').write_bytes(b'stored')
+        name = self.source / 'sub-example/anat/sub-example_T1w.nii.gz'
+        name.unlink()
+        name.symlink_to('../../.git/objects/KEY/KEY')
+        present = runtime.source_fingerprint(self.source, symlink_identity=True)
+        (objects / 'KEY').unlink()
+        self.assertEqual(runtime.source_fingerprint(self.source, symlink_identity=True), present)
+        with self.assertRaises(FileNotFoundError):
+            runtime.source_fingerprint(self.source)
+
+    def test_additive_sites_rearm_changed_datasets(self):
+        identity, settings = self.enroll()
+        with self.engine.begin() as connection:
+            connection.execute(runtime.update(runtime.DATASETS).values(
+                status='succeeded', completed_modes='["import", "preflight", "setup"]'))
+        (self.source / 'sub-example/anat/sub-example_T2w.nii.gz').write_bytes(b'added')
+        with self.assertRaisesRegex(ValueError, 'before file digests were recorded') as rejected:
+            runtime.enroll(self.engine, 'nandou', 'dataset', settings, 'Dataset', additive=True)
+        fingerprint = str(rejected.exception).rsplit(' ', 1)[1]
+        with self.assertRaisesRegex(ValueError, 'before file digests were recorded'):
+            runtime.enroll(self.engine, 'nandou', 'dataset', settings, 'Dataset', additive=True,
+                           accepted_fingerprint='0' * 64)
+        runtime.enroll(self.engine, 'nandou', 'dataset', settings, 'Dataset', additive=True,
+                       accepted_fingerprint=fingerprint)
+        row = runtime.get_dataset(self.engine, identity)
+        self.assertEqual((row['status'], row['completed_modes']), ('updated', '[]'))
+        self.assertIsNotNone(runtime.reserve(self.engine, identity, settings))
+
+    def additive_enroll(self, settings):
+        return runtime.enroll(self.engine, 'nandou', 'dataset', settings, 'Dataset', additive=True)
+
+    def test_additive_updates_reject_changed_or_removed_imported_files(self):
+        settings = runtime.resolve_settings(self.config, 'dataset', 'Dataset')
+        identity = self.additive_enroll(settings)
+        image = self.source / 'sub-example/anat/sub-example_T1w.nii.gz'
+        image.write_bytes(b'rewritten')
+        with self.assertRaisesRegex(ValueError, 'changed or removed imported files.*sub-example_T1w'):
+            self.additive_enroll(settings)
+        image.unlink()
+        with self.assertRaisesRegex(ValueError, 'changed or removed imported files'):
+            self.additive_enroll(settings)
+        image.write_bytes(b'fixture')
+        (self.source / 'participants.tsv').write_text('participant_id\nsub-example\nsub-added\n')
+        (self.source / 'sub-added/anat').mkdir(parents=True)
+        (self.source / 'sub-added/anat/sub-added_T1w.nii.gz').write_bytes(b'added')
+        self.additive_enroll(settings)
+        self.assertEqual(runtime.get_dataset(self.engine, identity)['status'], 'updated')
+        (self.source / 'sub-added/anat/sub-added_T1w.nii.gz').write_bytes(b'changed after re-arm')
+        with self.assertRaisesRegex(ValueError, 'sub-added_T1w'):
+            self.additive_enroll(settings)
+
+    def test_additive_records_baseline_for_unchanged_legacy_rows(self):
+        identity, settings = self.enroll()
+        self.additive_enroll(settings)
+        (self.source / 'sub-example/anat/sub-example_T1w.nii.gz').write_bytes(b'rewritten')
+        with self.assertRaisesRegex(ValueError, 'changed or removed imported files'):
+            self.additive_enroll(settings)
+        self.assertEqual(runtime.get_dataset(self.engine, identity)['status'], 'new')
+
+    def test_site_options_are_opt_in_and_validated(self):
+        self.assertEqual(runtime.site_options({'bidsImport': {}}), (False, False))
+        self.assertEqual(runtime.site_options({'bidsImport': {'symlinkedContent': 'identity',
+                                                              'updates': 'additive'}}), (True, True))
+        with self.assertRaisesRegex(ValueError, 'Unsupported'):
+            runtime.site_options({'bidsImport': {'updates': 'replace'}})
+
     def test_renamed_folder_cannot_bypass_import_history(self):
         self.enroll()
         self.source.rename(self.site / 'renamed')

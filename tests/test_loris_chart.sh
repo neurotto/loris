@@ -311,8 +311,49 @@ assert_resources 'NFS site mounts remain read-only in portal and import Pods' '
         .containers[0].volumeMounts | any(.mountPath == "/data/loris/data/assembly_bids/simsite" and
             .readOnly == true)))'
 
+pvc_values='{"enabled":true,"loris":{"data":{"persistence":{"enabled":true}}},"bidsImport":{"enabled":true},
+    "sites":[{"name":"simsite","siteAlias":"SIM","enabled":true,"source":"pvc","claimName":"loris-data",
+              "subPath":"copies/simsite","bidsImport":{"enabled":true,"project":"P","projectAlias":"P",
+              "symlinkedContent":"identity","updates":"additive"}}]}'
+rendered=$(render_chart "$pvc_values")
+assert_resources 'PVC site sources mount an existing claim read-only without creating NFS volumes' '
+    ([.[] | select(.kind == "PersistentVolume" or .kind == "PersistentVolumeClaim") |
+        select(.metadata.name == "loris-bids-simsite")] | length == 0) and
+    ([(.[] | select(.kind == "Deployment" and .metadata.name == "loris") | .spec.template.spec),
+      (.[] | select(.kind == "CronJob") | .spec.jobTemplate.spec.template.spec)] |
+        length == 2 and all(.[];
+        (.containers[0].volumeMounts | map(select(.mountPath == "/data/loris/data/assembly_bids/simsite")) |
+            length == 1 and .[0].readOnly == true and .[0].subPath == "copies/simsite") as $mounted |
+        (.volumes | any(.persistentVolumeClaim.claimName == "loris-data")) and $mounted))'
+
+assert_resources 'site import options reach the runtime profile' '
+    [.[] | select(.kind == "ConfigMap" and .metadata.name == "loris-bids-simsite-profile")][0].data["runtime.json"] |
+    fromjson | .site.bidsImport.symlinkedContent == "identity" and .site.bidsImport.updates == "additive"'
+
+fingerprint=$(printf '%064d' 0 | tr 0 a)
+accepted=${pvc_values/\"updates\":\"additive\"/\"updates\":\"additive\",\"datasets\":\{\"dataset\":\{\"acceptFingerprint\":\"$fingerprint\"\}\}}
+rendered=$(render_chart "$accepted")
+assert_resources 'accepted fingerprints reach the runtime profile without entering settings validation' '
+    [.[] | select(.kind == "ConfigMap" and .metadata.name == "loris-bids-simsite-profile")][0].data["runtime.json"] |
+    fromjson | .site.bidsImport.datasets.dataset.acceptFingerprint == "'"$fingerprint"'"'
+
+for invalid in "${pvc_values/\"identity\"/\"annex\"}" "${pvc_values/\"additive\"/\"replace\"}" \
+        "${accepted/$fingerprint/ABC}" "${accepted/\"additive\"/\"reject\"}"; do
+    if render_chart "$invalid" >/dev/null 2>&1; then
+        printf 'FAIL: invalid site import option must not render: %s\n' "$invalid" >&2
+        exit 1
+    fi
+    tests_passed=$((tests_passed + 1))
+done
+
 for invalid in \
  '{"enabled":true,"sites":[{"name":"simsite","enabled":true,"source":"rsync"}]}' \
+ '{"enabled":true,"sites":[{"name":"simsite","enabled":true,"source":"pvc"}]}' \
+ '{"enabled":true,"sites":[{"name":"simsite","enabled":true,"source":"pvc","claimName":"Bad_Claim"}]}' \
+ '{"enabled":true,"sites":[{"name":"simsite","enabled":true,"source":"pvc","claimName":"c","subPath":"/abs"}]}' \
+ '{"enabled":true,"sites":[{"name":"simsite","enabled":true,"source":"pvc","claimName":"c","subPath":"a/../b"}]}' \
+ '{"enabled":true,"sites":[{"name":"simsite","enabled":true,"source":"pvc","claimName":"c","server":"192.0.2.1"}]}' \
+ '{"enabled":true,"sites":[{"name":"simsite","enabled":true,"server":"192.0.2.1","claimName":"c"}]}' \
  '{"enabled":true,"sites":[{"name":"nandou","enabled":true}]}' \
  '{"enabled":true,"sites":[{"name":"simsite","enabled":true,"source":"clone"}]}' \
  '{"enabled":true,"siteClones":{"subPath":"legacy-clones"}}' \
@@ -323,7 +364,7 @@ for invalid in \
     fi
     tests_passed=$((tests_passed + 1))
 done
-printf 'PASS: non-NFS sources and legacy clone settings are rejected\n'
+printf 'PASS: unsupported or inconsistent site sources and legacy clone settings are rejected\n'
 
 loris_env='[.[] | select(.kind == "Deployment" and .metadata.name == "loris") | .spec.template.spec.containers[] |
     select(.name == "loris") | .env | map({(.name): .value}) | add]'

@@ -86,7 +86,11 @@ ingress:
 #     source: nfs             nfs (default): NFS export at server:nfsPort/bids (templates/site-volumes.yaml)
 #     server: nfs.example.org
 #     nfsPort: 20490
-#     bidsImport: {...}
+#   or, for content already in the cluster (e.g. a synchronized copy maintained by another workload):
+#     source: pvc             existing claim in the release namespace, mounted read-only
+#     claimName: site-copies
+#     subPath: sites/nandou   optional relative directory inside the claim
+#     bidsImport: {...}      symlinkedContent: resolve|identity and updates: reject|additive are site-only
 sites: []
 
 # Optional provider-neutral service for asynchronously prepared site content.
