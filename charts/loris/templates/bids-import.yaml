@@ -155,6 +155,12 @@ spec:
                 capabilities:
                   drop: [ALL]
               env:
+                {{- with $root.Values.contentProvider.url }}
+                - name: LORIS_CONTENT_PROVIDER_URL
+                  value: {{ . | quote }}
+                - name: LORIS_CONTENT_ROOT
+                  value: /data/loris/data/assembly_bids
+                {{- end }}
                 - name: LORIS_CONFIG
                   value: /import-profile
                 - name: LORIS_DB_HOST
@@ -183,7 +189,7 @@ spec:
                   readOnly: true
                 - name: loris-data
                   mountPath: /data/loris
-                {{- include "loris.siteMount" (list . $root "site-data") | indent 16 }}
+{{ include "loris.siteMount" (list . $root "site-data") | indent 16 }}
           volumes:
             - name: profile
               configMap:
@@ -191,7 +197,7 @@ spec:
             - name: loris-data
               persistentVolumeClaim:
                 claimName: {{ $root.Values.loris.data.persistence.existingClaim | default "loris-data" | quote }}
-            {{- include "loris.siteVolume" (list . "site-data") | indent 12 }}
+{{ include "loris.siteVolume" (list . "site-data") | indent 12 }}
 {{- end }}
 {{- end }}
 {{- end }}

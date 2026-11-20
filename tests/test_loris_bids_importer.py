@@ -1,7 +1,6 @@
 import json
 import os
 from pathlib import Path
-import re
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -139,24 +138,6 @@ class ImporterIntegrationTests(unittest.TestCase):
             self.source, self.view, self.settings['project'], self.site, self.name,
             subject_prefix=self.settings['subjectPrefix'])
 
-    def physiological(self):
-        """Return (FilePath, chunk path or None) of the view's physiological files."""
-        with self.engine.connect() as connection:
-            return connection.execute(text(
-                'SELECT f.FilePath, p.Value FROM physiological_file f '
-                'LEFT JOIN (physiological_parameter_file p JOIN parameter_type t '
-                "ON t.ParameterTypeID = p.ParameterTypeID AND t.Name = 'electrophysiology_chunked_dataset_path') "
-                'ON p.PhysiologicalFileID = f.PhysiologicalFileID '
-                'WHERE f.FilePath LIKE :prefix ORDER BY f.FilePath'
-            ), {'prefix': str(self.view.relative_to(runtime.ROOT)) + '/%'}).all()
-
-    def file_reader_lookup(self, chunks):
-        """Run the patched file_reader chunk lookup as LORIS pselectOne does (it appends LIMIT 2)."""
-        source = Path('/var/www/loris/modules/electrophysiology_browser/php/file_reader.class.inc').read_text()
-        query = re.search(r'pselectOne\(\s*"([^"]+)"', source).group(1)
-        with self.engine.connect() as connection:
-            return [tuple(row) for row in connection.execute(text(query + ' LIMIT 2'), {'chunks': chunks}).all()]
-
     def test_numeric_brainvision_mapping_keeps_header_references_on_retry(self):
         directory = self.brainvision()
         before = {path.name: path.read_bytes() for path in directory.iterdir()}
@@ -176,56 +157,38 @@ class ImporterIntegrationTests(unittest.TestCase):
         # The .vhdr header stands for the recording; its .vmrk and .eeg are not registered apart.
         self.assertEqual([Path(row[0]).suffix for row in registrations[1]], ['.vhdr'])
         self.assertTrue(all((runtime.ROOT / row[1]).is_file() for row in registrations[1]))
-
-    def test_eeg_repair_keeps_the_header_and_records_the_cache_chunk_path(self):
-        directory = self.brainvision()
-        stored = self.annex(directory / 'sub-001_task-rest_eeg.vhdr')
-        self.brainvision_view()
-        original_helper = runtime.helper
-
-        def legacy(name):
-            module = original_helper(name)
-            if name == 'bids_ephys':
-                module.brainvision_primary = lambda files: files
-                module.lazy_chunk_path = lambda data_dir, path: None
-            return module
-
-        with patch.object(runtime, 'helper', side_effect=legacy):
-            self.assertEqual(runtime.import_dataset(self.view, self.settings)['errors'], 0)
-        legacy_rows = self.physiological()
-        self.assertEqual([(Path(row[0]).suffix, row[1]) for row in legacy_rows],
-                         [('.eeg', None), ('.vhdr', None), ('.vmrk', None)])
-
-        repair = runtime.helper('bids_eeg_chunks')
-        with self.assertRaisesRegex(ValueError, 'Expected 2'):
-            repair.repair(self.engine, self.view, runtime.ROOT, 2, apply=True)
-        repair.repair(self.engine, self.view, runtime.ROOT, 3)
-        self.assertEqual(self.physiological(), legacy_rows)
-        repair.repair(self.engine, self.view, runtime.ROOT, 3, apply=True)
-        key = stored.name
-        chunks = 're-move-chunks/%s/dataset/%s/sub-001_task-rest_eeg.chunks' % (self.site, key)
-        header = [row for row in legacy_rows if row[0].endswith('.vhdr')][0][0]
-        self.assertEqual([tuple(row) for row in self.physiological()], [(header, chunks)])
         with self.engine.connect() as connection:
-            self.assertEqual(connection.scalar(text(
-                'SELECT c.Value FROM Config c JOIN ConfigSettings s ON s.ID = c.ConfigID '
-                "WHERE s.Name = 'useEEGBrowserVisualizationComponents'")), 'true')
-            self.assertEqual(connection.scalar(text(
-                'SELECT COUNT(*) FROM physiological_channel ch JOIN physiological_file f '
-                'ON f.PhysiologicalFileID = ch.PhysiologicalFileID WHERE f.FilePath = :path'), {'path': header}), 1)
-            self.assertTrue(connection.scalar(text(
-                'SELECT COUNT(*) FROM physiological_archive a JOIN physiological_file f '
-                'ON f.PhysiologicalFileID = a.PhysiologicalFileID WHERE f.FilePath = :path'), {'path': header}))
-            self.assertEqual(connection.scalar(text(
-                'SELECT c.Name FROM parameter_type t JOIN parameter_type_category_rel r USING (ParameterTypeID) '
-                'JOIN parameter_type_category c USING (ParameterTypeCategoryID) '
-                "WHERE t.Name = 'electrophysiology_chunked_dataset_path'")), 'Electrophysiology Variables')
-        self.assertEqual(self.file_reader_lookup(chunks), [(header,)])
-        self.assertEqual(self.file_reader_lookup(chunks + 'x'), [(None,)])
-        repair.repair(self.engine, self.view, runtime.ROOT, 1, apply=True)
-        self.assertEqual([tuple(row) for row in self.physiological()], [(header, chunks)])
+            chunks = connection.scalar(text(
+                'SELECT p.Value FROM physiological_parameter_file p '
+                'JOIN parameter_type t USING (ParameterTypeID) '
+                'JOIN physiological_file f USING (PhysiologicalFileID) '
+                "WHERE t.Name = 'electrophysiology_chunked_dataset_path' AND f.FilePath LIKE :prefix"
+            ), {'prefix': str(self.view.relative_to(runtime.ROOT)) + '/%'})
+        chunk_dir = runtime.ROOT / chunks
+        metadata = json.loads((chunk_dir / 'index.json').read_text())
+        self.assertEqual(metadata['channelMetadata'][0]['name'], 'Cz')
+        self.assertEqual(metadata['validSamples'], [32])
+        self.assertEqual(metadata['downsamplings'], [0])
+        self.assertTrue(any(path.stat().st_size for path in chunk_dir.rglob('*.buf')))
+
+    def test_brainvision_chunk_failure_retries_without_partial_output(self):
+        from loris_ephys_chunker import chunking
+
+        self.brainvision()
+        self.brainvision_view()
+        original = chunking.write_chunk_directory
+
+        def interrupted(*args, **kwargs):
+            original(*args, **kwargs)
+            raise RuntimeError('synthetic chunk failure')
+
+        with patch.object(chunking, 'write_chunk_directory', side_effect=interrupted):
+            with self.assertRaisesRegex(ValueError, 'acquisition verification'):
+                runtime.import_dataset(self.view, self.settings)
+        chunks_root = runtime.ROOT / 'assembly_bids' / (self.view.name + '_chunks')
+        self.assertEqual(list(chunks_root.iterdir()), [])
         self.assertEqual(runtime.import_dataset(self.view, self.settings)['errors'], 0)
-        self.assertEqual([tuple(row) for row in self.physiological()], [(header, chunks)])
+        self.assertEqual(self.counts(), (1, 1, 1))
 
     def test_real_import_and_repeat_keep_one_candidate_session_and_file(self):
         runtime.verify_ownership(self.engine, self.source, self.site, self.settings)
@@ -235,74 +198,6 @@ class ImporterIntegrationTests(unittest.TestCase):
         self.assertEqual(self.counts(), (1, 1, 1))
         second = runtime.import_dataset(self.view, self.settings)
         self.assertEqual(second['ignored'], 1)
-        self.assertEqual(self.counts(), (1, 1, 1))
-
-    def annex(self, path):
-        """Move a file into the dataset annex as a locked git-annex link; return its object."""
-        import hashlib
-        data = path.read_bytes()
-        key = 'MD5E-s%d--%s%s' % (len(data), hashlib.md5(data).hexdigest(), ''.join(path.suffixes))
-        stored = self.source / '.git/annex/objects/Aa/Bb' / key / key
-        stored.parent.mkdir(parents=True)
-        path.rename(stored)
-        path.symlink_to(os.path.relpath(stored, path.parent))
-        return stored
-
-    def test_clone_update_imports_additions_after_registered_content_was_dropped(self):
-        import nibabel as nib
-        import numpy as np
-        first = self.annex(self.image)
-        self.view = runtime.ROOT / 'assembly_bids' / (self.view.name + '-annex')
-        view = runtime.helper('bids-view')
-        view.prepare_view(self.source, self.view, self.settings['project'], self.site, self.name)
-        self.assertEqual(runtime.import_dataset(self.view, self.settings)['imported'], 1)
-        first.unlink()
-        added = self.image.with_name('sub-' + self.subject + '_T2w.nii.gz')
-        nib.save(nib.Nifti1Image(np.ones((8, 8, 8), dtype=np.float32), np.eye(4)), added)
-        self.annex(added)
-        view.prepare_view(self.source, self.view, self.settings['project'], self.site, self.name,
-                          reuse=True, extend=True)
-        result = runtime.import_dataset(self.view, self.settings)
-        self.assertEqual((result['errors'], result['imported'], result['ignored']), (0, 1, 1))
-        self.assertEqual(self.counts(), (2, 1, 1))
-
-    def test_preview_only_repair_fetches_missing_content_and_preserves_registrations(self):
-        repair = runtime.helper('bids_previews')
-        runtime.import_dataset(self.view, self.settings)
-        with self.engine.connect() as connection:
-            relative = connection.scalar(text(
-                "SELECT p.Value FROM parameter_file p JOIN parameter_type t ON p.ParameterTypeID=t.ParameterTypeID "
-                "JOIN files f ON p.FileID=f.FileID WHERE t.Name='check_pic_filename' AND f.File LIKE :prefix"
-            ), {'prefix': str(self.view.relative_to(runtime.ROOT)) + '/%'})
-        preview = runtime.ROOT / 'pic' / relative
-        preview.unlink()
-        content = self.image.read_bytes()
-        self.image.unlink()
-        def fetch(path, root, site, dataset, url):
-            self.assertFalse(path.exists())
-            self.image.write_bytes(content)
-        with patch.object(repair, 'cache_content', side_effect=fetch) as cache:
-            self.assertEqual(repair.repair(
-                self.engine, self.view, runtime.ROOT, self.site, 'dataset', 'http://cache', 1), 1)
-            cache.assert_not_called()
-            self.assertEqual(repair.repair(
-                self.engine, self.view, runtime.ROOT, self.site, 'dataset', 'http://cache', 1, True), 0)
-            self.assertEqual(cache.call_count, 1)
-            self.assertEqual(repair.repair(
-                self.engine, self.view, runtime.ROOT, self.site, 'dataset', 'http://cache', 1, True), 0)
-            self.assertEqual(cache.call_count, 1)
-        self.assertTrue(preview.is_file())
-        self.assertEqual(self.counts(), (1, 1, 1))
-        with self.assertRaisesRegex(ValueError, 'Expected 2'):
-            repair.repair(self.engine, self.view, runtime.ROOT, self.site, 'dataset', 'http://cache', 2, True)
-
-    def test_preview_only_repair_propagates_fetch_failure_without_importing(self):
-        repair = runtime.helper('bids_previews')
-        runtime.import_dataset(self.view, self.settings)
-        with patch.object(repair, 'preview_valid', return_value=False), patch.object(
-                repair, 'cache_content', side_effect=ValueError('site offline')):
-            with self.assertRaisesRegex(ValueError, 'site offline'):
-                repair.repair(self.engine, self.view, runtime.ROOT, self.site, 'dataset', 'http://cache', 1, True)
         self.assertEqual(self.counts(), (1, 1, 1))
 
     def test_import_cannot_silently_ignore_missing_preview_with_dropped_image(self):

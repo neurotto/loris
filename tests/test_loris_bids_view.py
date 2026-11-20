@@ -1,6 +1,5 @@
 import importlib.util
 import json
-import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -36,6 +35,80 @@ class BidsViewTests(unittest.TestCase):
         self.assertIn('Penthera-3T', (destination / 'participants.tsv').read_text())
         with self.assertRaises(ValueError):
             bids_view.prepare_view(self.source, destination, 'Penthera_3T', 'scilus', 'Penthera-3T')
+
+    def store_content(self, content=b'stored content'):
+        """Replace the T1w file with a symlink into a content-addressed store, as git-annex does."""
+        anat = self.source / 'sub-example' / 'ses-000' / 'anat'
+        objects = self.source / '.git' / 'objects' / 'KEY'
+        objects.mkdir(parents=True)
+        (objects / 'KEY').write_bytes(content)
+        name = anat / 'sub-example_ses-000_T1w.nii.gz'
+        name.unlink()
+        name.symlink_to('../../../.git/objects/KEY/KEY')
+        return name, objects / 'KEY'
+
+    def test_identity_views_accept_absent_content_and_link_source_paths(self):
+        name, stored = self.store_content()
+        stored.unlink()
+        with self.assertRaises(FileNotFoundError):
+            bids_view.prepare_view(self.source, self.root / 'strict', 'Project', 'nandou', 'Dataset')
+        destination = self.root / 'view'
+        bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', symlink_identity=True)
+        link = destination / name.relative_to(self.source)
+        self.assertEqual(Path(link.readlink()), name.absolute())
+        stored.write_bytes(b'stored content')
+        bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True,
+                               symlink_identity=True)
+        self.assertEqual(link.read_bytes(), b'stored content')
+
+    def test_identity_rejects_escaping_symlinks(self):
+        name, _ = self.store_content()
+        name.unlink()
+        name.symlink_to(self.root / 'outside')
+        with self.assertRaisesRegex(ValueError, 'escapes'):
+            bids_view.prepare_view(self.source, self.root / 'view', 'Project', 'nandou', 'Dataset',
+                                   symlink_identity=True)
+
+    def test_identity_rejects_targets_behind_further_symlinks(self):
+        name, stored = self.store_content()
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (self.source / '.git' / 'escape').symlink_to(outside)
+        (self.source / '.git' / 'chained').symlink_to(stored)
+        for target in ('../../../.git/escape/later.nii.gz', '../../../.git/chained'):
+            name.unlink()
+            name.symlink_to(target)
+            with self.assertRaisesRegex(ValueError, 'further symlinks'):
+                bids_view.prepare_view(self.source, self.root / 'view', 'Project', 'nandou', 'Dataset',
+                                       symlink_identity=True)
+
+    def test_identity_upgrades_links_to_the_same_stored_target(self):
+        name, stored = self.store_content()
+        destination = self.root / 'view'
+        bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', symlink_identity=True)
+        link = destination / name.relative_to(self.source)
+        link.unlink()
+        link.symlink_to(stored)
+        bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True,
+                               symlink_identity=True)
+        self.assertEqual(Path(link.readlink()), name.absolute())
+
+    def test_additive_reuse_accepts_additions_but_not_changes(self):
+        destination = self.root / 'view'
+        bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset')
+        added = self.source / 'sub-second' / 'anat'
+        added.mkdir(parents=True)
+        (added / 'sub-second_T1w.nii.gz').write_bytes(b'new')
+        (self.source / 'participants.tsv').write_text('participant_id\tsex\nsub-example\tM\nsub-second\tF\n')
+        with self.assertRaisesRegex(ValueError, 'conflicts'):
+            bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True)
+        bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True, additive=True)
+        self.assertTrue((destination / 'sub-second' / 'anat' / 'sub-second_T1w.nii.gz').is_symlink())
+        self.assertIn('sub-second', (destination / 'participants.tsv').read_text())
+        (self.source / 'sub-example' / 'ses-000' / 'anat' / 'sub-example_ses-000_T1w.nii.gz').unlink()
+        with self.assertRaisesRegex(ValueError, 'sub-example_ses-000_T1w'):
+            bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True,
+                                   additive=True)
 
     def test_numeric_subjects_are_not_silently_registered(self):
         (self.source / 'sub-example').rename(self.source / 'sub-001')
@@ -104,49 +177,19 @@ class BidsViewTests(unittest.TestCase):
         (destination / bids_view.ARTIFACTS).write_text(json.dumps({'modified.tgz': '0' * 64}))
         with self.assertRaisesRegex(ValueError, 'artifact was modified'):
             bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True)
-
-
-    def annex(self, relative, key, content=None):
-        """Replace a source file with a locked git-annex link, optionally without content."""
-        path = self.source / relative
-        objects = self.source / '.git/annex/objects/Xx/Yy' / key
-        objects.mkdir(parents=True, exist_ok=True)
-        if content is not None:
-            (objects / key).write_bytes(content)
-        if path.exists() or path.is_symlink():
-            path.unlink()
-        path.symlink_to(os.path.relpath(objects / key, path.parent))
-        return objects / key
-
-    def test_annexed_files_link_by_key_without_content_and_skip_git(self):
-        nifti = 'sub-example/ses-000/anat/sub-example_ses-000_T1w.nii.gz'
-        target = self.annex(nifti, 'MD5E-s4--a.nii.gz')
-        (self.source / '.git/config').write_text('[core]\n')
+    def test_source_changes_require_a_new_reviewed_view(self):
         destination = self.root / 'view'
         bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset')
-        self.assertEqual(os.readlink(destination / nifti), str(target.resolve(strict=False)))
-        self.assertFalse((destination / '.git').exists())
-        self.assertEqual(bids_view.prepare_view(
-            self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True), 1)
-
-    def test_extension_adds_new_files_but_rejects_changed_or_removed_ones(self):
-        destination = self.root / 'view'
-        self.annex('sub-example/ses-000/anat/sub-example_ses-000_T1w.nii.gz', 'MD5E-s4--a.nii.gz')
-        bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset')
-        anat = self.source / 'sub-other/ses-000/anat'
-        anat.mkdir(parents=True)
-        self.annex('sub-other/ses-000/anat/sub-other_ses-000_T1w.nii.gz', 'MD5E-s4--b.nii.gz')
-        (self.source / 'participants.tsv').write_text('participant_id\tsex\nsub-example\tM\nsub-other\tF\n')
+        additional = self.source / 'sub-example/ses-000/anat/new_T1w.nii.gz'
+        additional.write_bytes(b'new source content')
         with self.assertRaisesRegex(ValueError, 'conflicts'):
             bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True)
-        self.assertEqual(bids_view.prepare_view(
-            self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True, extend=True), 2)
-        self.assertTrue((destination / 'sub-other/ses-000/anat/sub-other_ses-000_T1w.nii.gz').is_symlink())
-        self.assertIn('sub-other', (destination / 'participants.tsv').read_text())
-        self.assertEqual([entry.name for entry in destination.parent.iterdir() if entry.name.startswith('.')], [])
-        self.annex('sub-example/ses-000/anat/sub-example_ses-000_T1w.nii.gz', 'MD5E-s5--c.nii.gz')
-        with self.assertRaisesRegex(ValueError, 'need review: sub-example'):
-            bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True, extend=True)
+        additional.unlink()
+
+        original = self.source / 'sub-example/ses-000/anat/sub-example_ses-000_T1w.nii.gz'
+        original.rename(original.with_name('renamed_T1w.nii.gz'))
+        with self.assertRaisesRegex(ValueError, 'conflicts'):
+            bids_view.prepare_view(self.source, destination, 'Project', 'nandou', 'Dataset', reuse=True)
 
 
 if __name__ == '__main__':

@@ -1,0 +1,727 @@
+diff --git a/modules/api/php/endpoints/candidate/visit/image/image.class.inc b/modules/api/php/endpoints/candidate/visit/image/image.class.inc
+index bb14a0b..e3eb5e8 100644
+--- a/modules/api/php/endpoints/candidate/visit/image/image.class.inc
++++ b/modules/api/php/endpoints/candidate/visit/image/image.class.inc
+@@ -172,6 +172,11 @@ class Image extends Endpoint implements \LORIS\Middleware\ETagCalculator
+ 
+         $info = $image->getFileInfo();
+ 
++        $pending = \LORIS\ContentProvider::check($info->getPathname());
++        if ($pending !== null) {
++            return \LORIS\ContentProvider::response($pending);
++        }
++
+         if (!$info->isFile()) {
+             error_log(
+                 'file '
+@@ -223,6 +228,10 @@ class Image extends Endpoint implements \LORIS\Middleware\ETagCalculator
+         }
+ 
+         $info = $image->getFileInfo();
++        if (!$info->isFile()) {
++            // Content not present (fetched on demand): no ETag, no 304.
++            return '';
++        }
+ 
+         $signature = [
+             'filename' => $this->_filename,
+diff --git a/modules/brainbrowser/js/brainbrowser.loris.js b/modules/brainbrowser/js/brainbrowser.loris.js
+index 345898c..cc9ad84 100644
+--- a/modules/brainbrowser/js/brainbrowser.loris.js
++++ b/modules/brainbrowser/js/brainbrowser.loris.js
+@@ -809,11 +809,64 @@ function initializeBrainBrowser() {
+ 
+     viewer.setDefaultPanelSize(panelSize, panelSize);
+ 
+-    fetch(
+-      'imageinfo?fileids=' + mincIDs + '&fileurls=' + fileUrls,
+-      {credentials: 'same-origin', method: 'GET'}
+-    )
+-      .then((resp) => resp.json())
++    // On-demand images answer 503 while a provider prepares them.
++    const imageInfoStarted = Date.now();
++    const imageInfoMaxWaitMs = 5 * 60 * 1000;
++    const imageInfoController = new AbortController();
++    window.addEventListener(
++      'pagehide',
++      function() { imageInfoController.abort(); },
++      {once: true}
++    );
++    const waitForImageInfo = function(milliseconds) {
++      return new Promise((resolve, reject) => {
++        const signal = imageInfoController.signal;
++        const abort = function() {
++          clearTimeout(timer);
++          reject(new Error('Image loading was cancelled.'));
++        };
++        let timer;
++        signal.addEventListener('abort', abort, {once: true});
++        timer = setTimeout(function() {
++          signal.removeEventListener('abort', abort);
++          resolve();
++        }, milliseconds);
++      });
++    };
++    const fetchImageInfo = function() {
++      const elapsed = Date.now() - imageInfoStarted;
++      if (elapsed >= imageInfoMaxWaitMs) {
++        throw new Error('Timed out while waiting for the images.');
++      }
++      return fetch(
++        'imageinfo?fileids=' + mincIDs + '&fileurls=' + fileUrls,
++        {
++          credentials: 'same-origin',
++          method: 'GET',
++          signal: imageInfoController.signal,
++        }
++      ).then((resp) => {
++        if (resp.status !== 503) {
++          return resp.json();
++        }
++        return resp.json().then((body) => {
++          if (body.state !== 'pending') {
++            throw new Error(body.error || 'The images are unavailable.');
++          }
++          const seconds = Math.round(elapsed / 1000);
++          loadingDiv.text(body.error + ' (' + seconds + ' s)');
++          const retry = Math.min(
++            Math.max(Number(resp.headers.get('Retry-After')) || 5, 1),
++            60
++          );
++          const remaining = imageInfoMaxWaitMs - elapsed;
++          return waitForImageInfo(Math.min(retry * 1000, remaining))
++            .then(fetchImageInfo);
++        });
++      });
++    };
++
++    fetchImageInfo()
+       .then((data) => {
+         for (const file of data) {
+           let volume = {
+@@ -849,6 +902,9 @@ function initializeBrainBrowser() {
+             viewer.loadVolumes(bboptions); // load the volumes
+           }
+         );
++      })
++      .catch((error) => {
++        loadingDiv.text(error.message);
+       });
+ 
+     return viewer;
+diff --git a/modules/brainbrowser/php/imageinfo.class.inc b/modules/brainbrowser/php/imageinfo.class.inc
+index b3fbaaf..575ba5c 100644
+--- a/modules/brainbrowser/php/imageinfo.class.inc
++++ b/modules/brainbrowser/php/imageinfo.class.inc
+@@ -58,7 +58,14 @@ class ImageInfo extends \NDB_Page
+                 );
+             }
+ 
++            // The database cursor is single-pass; both consumers need the rows.
++            $dbfiles = iterator_to_array($dbfiles);
+             $response = $this->_generateResults($dbfiles);
++
++            $pending = $this->_pendingContent($dbfiles);
++            if ($pending !== null) {
++                return \LORIS\ContentProvider::response($pending);
++            }
+         }
+ 
+         if (count($fileurls) > 0) {
+@@ -238,6 +245,33 @@ class ImageInfo extends \NDB_Page
+         return join(" UNION ", $queries);
+     }
+ 
++    /**
++     * Ask for the content of every imaging browser file that is fetched on
++     * demand, so one viewer request can wait for them all.
++     *
++     * @param iterable $dbfiles The results of the database query
++     *
++     * @return ?array null when every file can be served, else the status of
++     *                an unavailable file, or else of a file being fetched
++     */
++    private function _pendingContent(iterable $dbfiles) : ?array
++    {
++        $imagepath = \NDB_Factory::singleton()->config()->getSetting('imagePath');
++        $pending   = null;
++        foreach ($dbfiles as $row) {
++            if ($row['Source'] !== 'ImagingBrowser') {
++                continue;
++            }
++            $status = \LORIS\ContentProvider::check($imagepath . $row['File']);
++            if ($status !== null
++                && ($pending === null || $status['state'] === 'unavailable')
++            ) {
++                $pending = $status;
++            }
++        }
++        return $pending;
++    }
++
+     /**
+      * Formulate the database results into an appropriate JSON format
+      * and return the response.
+diff --git a/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/ajax/index.tsx b/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/ajax/index.tsx
+index 9d5fcdf..e060c21 100644
+--- a/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/ajax/index.tsx
++++ b/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/ajax/index.tsx
+@@ -28,6 +28,89 @@ export const fetchJSON = (url: string, params?: RequestInit) =>
+     return response.json().then((data) => data);
+   });
+ 
++/**
++ * fetchPreparedJSON: fetchJSON for data a server prepares on demand. While
++ * the server answers 503 with a pending state, wait Retry-After seconds and
++ * ask again, with a bounded wait that can be cancelled by the caller.
++ *
++ * @param {string} url - The url to fetch
++ * @param {Function} onWait - Called with the server's message while waiting,
++ *                            with null once the data is served
++ * @param {object} params - The request params
++ * @returns {Promise} - The json data, null if unavailable or timed out
++ */
++export const fetchPreparedJSON = (
++  url: string,
++  onWait: (message: string | null, final: boolean) => void,
++  params?: RequestInit,
++  maxWaitMs = 5 * 60 * 1000,
++) : Promise<any> => {
++  const started = Date.now();
++  const signal = params?.signal;
++  const wait = (milliseconds: number): Promise<void> =>
++    new Promise((resolve, reject) => {
++      if (signal?.aborted) {
++        const error = new Error('Content request was cancelled.');
++        error.name = 'AbortError';
++        reject(error);
++        return;
++      }
++      let timer: ReturnType<typeof setTimeout> | undefined;
++      const abort = () => {
++        if (timer !== undefined) {
++          clearTimeout(timer);
++        }
++        signal?.removeEventListener('abort', abort);
++        const error = new Error('Content request was cancelled.');
++        error.name = 'AbortError';
++        reject(error);
++      };
++      signal?.addEventListener('abort', abort, {once: true});
++      if (signal?.aborted) {
++        abort();
++        return;
++      }
++      timer = setTimeout(() => {
++        signal?.removeEventListener('abort', abort);
++        resolve();
++      }, milliseconds);
++    });
++
++  const fetchAttempt = (): Promise<any> => {
++    const remaining = maxWaitMs - (Date.now() - started);
++    if (remaining <= 0) {
++      onWait('Timed out while waiting for content.', true);
++      return Promise.resolve(null);
++    }
++    return fetch(url, params).then((response) => {
++      if (response.status !== 503) {
++        if (!response.ok) {
++          onWait(response.statusText || 'Unable to load content.', true);
++          return null;
++        }
++        onWait(null, true);
++        return response.json();
++      }
++      return response.json().catch(() => ({})).then((body) => {
++        const message = body?.error || response.statusText || 'Content is being prepared.';
++        if (body?.state !== 'pending') {
++          onWait(message || 'Content is unavailable.', true);
++          return null;
++        }
++        onWait(message, false);
++        const seconds = Math.min(
++          Math.max(Number(response.headers.get('Retry-After')) || 5, 1),
++          60,
++        );
++        return wait(Math.min(seconds * 1000, remaining))
++          .then(fetchAttempt);
++      });
++    });
++  };
++
++  return fetchAttempt();
++};
++
+ /**
+  * fetchText
+  *
+diff --git a/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/eeglab/EEGLabSeriesProvider.tsx b/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/eeglab/EEGLabSeriesProvider.tsx
+index fc9c8e2..a5b7618 100644
+--- a/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/eeglab/EEGLabSeriesProvider.tsx
++++ b/modules/electrophysiology_browser/jsx/react-series-data-viewer/src/eeglab/EEGLabSeriesProvider.tsx
+@@ -4,7 +4,7 @@ import {applyMiddleware, createStore, Store} from 'redux';
+ import {Provider} from 'react-redux';
+ import {createEpicMiddleware} from 'redux-observable';
+ import thunk from 'redux-thunk';
+-import {fetchJSON, fetchText} from '../ajax';
++import {fetchJSON, fetchPreparedJSON, fetchText} from '../ajax';
+ import {rootEpic, rootReducer} from '../series/store';
+ import {emptyChannels, setChannels} from '../series/store/state/channels';
+ import {
+@@ -35,7 +35,6 @@ declare global {
+   }
+ }
+ 
+-
+ type CProps = {
+   channelsURL: string,
+   chunksURL: string,
+@@ -66,6 +65,7 @@ const MenuOption = {
+  */
+ class EEGLabSeriesProvider extends Component<CProps, any> {
+   private store: Store;
++  private chunksController: AbortController;
+ 
+   /**
+    * @class
+@@ -73,6 +73,7 @@ class EEGLabSeriesProvider extends Component<CProps, any> {
+    */
+   constructor(props: CProps) {
+     super(props);
++    this.chunksController = new AbortController();
+     const epicMiddleware = createEpicMiddleware();
+ 
+     this.store = createStore(
+@@ -83,6 +84,7 @@ class EEGLabSeriesProvider extends Component<CProps, any> {
+     this.state = {
+       activeMenuOption: 'TAG_MODE',
+       datasetTaggerTabsRef: createRef(),
++      signalStatus: null,
+     };
+ 
+     epicMiddleware.run(rootEpic);
+@@ -173,7 +175,9 @@ class EEGLabSeriesProvider extends Component<CProps, any> {
+           .then((json) => ({json, url}))
+           // if request fails don't resolve
+           .catch((error) => {
+-            console.error(error);
++            if (error?.name !== 'AbortError') {
++              console.error(error);
++            }
+             return Promise.resolve();
+           })];
+       } else {
+@@ -187,9 +191,26 @@ class EEGLabSeriesProvider extends Component<CProps, any> {
+       }));
+     });
+ 
+-    Promise.race(racers(fetchJSON, chunksURL, '/index.json')).then(
+-      ({json, url}) => {
+-        if (json) {
++    // Chunks may be prepared on first view; the response carries retry timing.
++    const started = Date.now();
++    const signalStatus = (message: string | null, final: boolean) => {
++      const elapsed = Math.round((Date.now() - started) / 1000);
++      this.setState({
++        signalStatus: message && {
++          message: final ? message : `${message} (${elapsed} s)`,
++          final,
++        },
++      });
++    };
++    const fetchIndex = (url: string) => fetchPreparedJSON(
++      url,
++      signalStatus,
++      {signal: this.chunksController.signal},
++    );
++    Promise.race(racers(fetchIndex, chunksURL, '/index.json')).then(
++      (result) => {
++        if (result?.json) {
++          const {json, url} = result;
+           const {
+             channelMetadata, shapes, timeInterval, seriesRange, validSamples,
+           } = json;
+@@ -372,6 +393,10 @@ class EEGLabSeriesProvider extends Component<CProps, any> {
+       });
+   }
+ 
++  componentWillUnmount() {
++    this.chunksController.abort();
++  }
++
+   /**
+    * Renders the React component.
+    *
+@@ -493,6 +518,18 @@ class EEGLabSeriesProvider extends Component<CProps, any> {
+             />
+           </TriggerableModal>
+         </div>
++        {this.state.signalStatus &&
++          <div
++            className={
++              'alert ' + (
++                this.state.signalStatus.final ? 'alert-warning' : 'alert-info'
++              )
++            }
++            role="status"
++          >
++            {this.state.signalStatus.message}
++          </div>
++        }
+         {signalViewer}
+         {rest}
+       </Provider>
+diff --git a/modules/electrophysiology_browser/php/file_reader.class.inc b/modules/electrophysiology_browser/php/file_reader.class.inc
+index dc3ff45..fd9d697 100644
+--- a/modules/electrophysiology_browser/php/file_reader.class.inc
++++ b/modules/electrophysiology_browser/php/file_reader.class.inc
+@@ -36,6 +36,10 @@ class File_Reader extends \NDB_Page
+         switch ($request->getMethod()) {
+         case "GET":
+             $file = $request->getQueryParams()['file'] ?? null;
++            $wait = $this->_contentAvailability($downloadpath, $file);
++            if ($wait !== null) {
++                return $wait;
++            }
+ 
+             $downloader = new \LORIS\FilesDownloadHandler(
+                 new \SPLFileInfo($downloadpath)
+@@ -49,4 +53,56 @@ class File_Reader extends \NDB_Page
+             ));
+         }
+     }
++
++    /**
++     * Provider-managed content and EEG chunks are prepared on demand: answer
++     * 503 with Retry-After until they are available.
++     *
++     * @param string $downloadpath The data directory, with a trailing slash
++     * @param mixed  $file         The requested file
++     *
++     * @return ?ResponseInterface The 503 response, or null to serve the file
++     */
++    private function _contentAvailability(
++        string $downloadpath,
++        $file
++    ): ?ResponseInterface {
++        if (!is_string($file) || $file === '' || str_contains($file, '..')) {
++            return null;
++        }
++        if (preg_match(
++            '#^(content-provider-chunks/[^/]+/[^/]+/[a-f0-9]{64}\.chunks)(/.*)?$#',
++            $file,
++            $match
++        ) === 1
++        ) {
++            $index = ($match[2] ?? '') === '/index.json';
++            if (!$index && is_file($downloadpath . $match[1] . '/index.json')) {
++                return null;
++            }
++            $filePath = \NDB_Factory::singleton()->database()->pselectOne(
++                "SELECT MIN(pf.FilePath) FROM physiological_file pf
++                   JOIN physiological_parameter_file ppf
++                     USING (PhysiologicalFileID)
++                   JOIN parameter_type pt USING (ParameterTypeID)
++                 WHERE pt.Name = 'electrophysiology_chunked_dataset_path'
++                   AND ppf.Value = :chunks",
++                ['chunks' => $match[1]]
++            );
++            if (!is_string($filePath)) {
++                return null;
++            }
++            $status = \LORIS\ContentProvider::chunks(
++                $downloadpath,
++                $filePath,
++                $match[1],
++                $index
++            );
++            return $status === null ? null
++                : \LORIS\ContentProvider::response($status);
++        }
++        $status = \LORIS\ContentProvider::check($downloadpath . $file);
++        return $status === null ? null
++            : \LORIS\ContentProvider::response($status);
++    }
+ }
+diff --git a/src/ContentProvider.php b/src/ContentProvider.php
+new file mode 100644
+index 0000000..fbd283f
+--- /dev/null
++++ b/src/ContentProvider.php
+@@ -0,0 +1,275 @@
++<?php declare(strict_types=1);
++
++namespace LORIS;
++
++use \Psr\Http\Message\ResponseInterface;
++
++/**
++ * Resolves optional, provider-managed content without exposing backend IDs.
++ */
++class ContentProvider
++{
++    private const NAME = '[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}';
++    private const MAX_RETRY_AFTER = 60;
++
++    /**
++     * Request missing content from the configured provider.
++     *
++     * @param string $path Absolute path of the file LORIS serves
++     *
++     * @return ?array null when content can be served or is not provider-managed
++     */
++    public static function check(string $path): ?array
++    {
++        $url = getenv('LORIS_CONTENT_PROVIDER_URL');
++        $contentPath = self::_locate($path);
++        if (!$url || $contentPath === null || is_file($path)) {
++            return null;
++        }
++
++        $status = self::_request($url, '/content', ['path' => $contentPath], 10);
++        if ($status['state'] === 'ready') {
++            return is_file($path) ? null : self::_pending(
++                'The provider reported ready content, but it is not visible locally yet.'
++            );
++        }
++        return $status;
++    }
++
++    /**
++     * Request EEG chunks for a registered source recording.
++     *
++     * @param string $dataDir  Data directory, with a trailing slash
++     * @param string $filePath Recording FilePath relative to the data directory
++     * @param string $chunks   Registered chunk path relative to the data directory
++     * @param bool   $touch    Whether to record access to already-present chunks
++     *
++     * @return ?array null when chunks can be served or are not provider-managed
++     */
++    public static function chunks(
++        string $dataDir,
++        string $filePath,
++        string $chunks,
++        bool $touch
++    ): ?array {
++        $url = getenv('LORIS_CONTENT_PROVIDER_URL');
++        $contentPath = self::_locate($dataDir . $filePath);
++        if (!$url || $contentPath === null) {
++            return null;
++        }
++
++        $parts = explode('/', $contentPath, 3);
++        if (count($parts) !== 3) {
++            return null;
++        }
++        $digest = hash('sha256', $parts[2]);
++        $expected = 'content-provider-chunks/' . $parts[0] . '/'
++            . $parts[1] . '/' . $digest . '.chunks';
++        if ($chunks !== $expected) {
++            return null;
++        }
++        $payload = ['path' => $contentPath, 'chunkPath' => $expected];
++        if (is_file($dataDir . $chunks . '/index.json')) {
++            if ($touch) {
++                self::_request($url, '/chunks', $payload, 1);
++            }
++            return null;
++        }
++
++        $status = self::_request(
++            $url,
++            '/chunks',
++            $payload,
++            10
++        );
++        if ($status['state'] === 'ready') {
++            return is_file($dataDir . $chunks . '/index.json') ? null
++                : self::_pending(
++                    'The provider reported ready chunks, but they are not visible locally yet.'
++                );
++        }
++        return $status;
++    }
++
++    /**
++     * Build the common response for content that is not ready yet.
++     *
++     * @param array $status A result returned by check() or chunks()
++     *
++     * @return ResponseInterface
++     */
++    public static function response(array $status): ResponseInterface
++    {
++        return (new \LORIS\Http\Response\JsonResponse(
++            [
++                'error'      => $status['message'],
++                'state'      => $status['state'],
++                'retryAfter' => $status['retryAfter'],
++            ],
++            503
++        ))->withHeader('Retry-After', (string)$status['retryAfter']);
++    }
++
++    /**
++     * Resolve the logical site/dataset path before a source symlink is followed.
++     */
++    private static function _locate(string $path): ?string
++    {
++        $root = rtrim(
++            getenv('LORIS_CONTENT_ROOT') ?: '/data/loris/data/assembly_bids',
++            '/'
++        );
++        $path = self::_normalize($path);
++        for ($hop = 0; $hop < 16; $hop++) {
++            $relative = self::_relative($path, $root);
++            if ($relative !== null) {
++                return $relative;
++            }
++            if (!is_link($path)) {
++                return null;
++            }
++            $target = readlink($path);
++            if ($target === false) {
++                return null;
++            }
++            $path = self::_normalize(
++                str_starts_with($target, '/') ? $target
++                    : dirname($path) . '/' . $target
++            );
++        }
++        return self::_relative($path, $root);
++    }
++
++    /**
++     * Validate a logical content path relative to the configured content root.
++     */
++    private static function _relative(string $path, string $root): ?string
++    {
++        if (!str_starts_with($path, $root . '/')) {
++            return null;
++        }
++        $parts = explode('/', substr($path, strlen($root) + 1));
++        if (
++            count($parts) < 3
++            || preg_match('/^' . self::NAME . '$/', $parts[0]) !== 1
++            || $parts[1] === ''
++            || str_starts_with($parts[1], '.')
++            || preg_match('//u', $parts[1]) !== 1
++            || preg_match('/^import-.+$/', $parts[0]) === 1
++            || in_array('.git', $parts, true)
++            || in_array('.', $parts, true)
++            || in_array('..', $parts, true)
++        ) {
++            return null;
++        }
++        return implode('/', $parts);
++    }
++
++    /**
++     * POST one logical path to the configured provider.
++     */
++    private static function _request(
++        string $url,
++        string $endpoint,
++        array $payload,
++        int $timeout
++    ): array {
++        $body = json_encode($payload, JSON_INVALID_UTF8_SUBSTITUTE);
++        $curl = curl_init(rtrim($url, '/') . $endpoint);
++        if ($body === false || $curl === false) {
++            error_log('Content provider request could not be initialized.');
++            return self::_unavailable('The content provider is unavailable.');
++        }
++        curl_setopt_array(
++            $curl,
++            [
++                CURLOPT_POST           => true,
++                CURLOPT_POSTFIELDS     => $body,
++                CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
++                CURLOPT_RETURNTRANSFER => true,
++                CURLOPT_CONNECTTIMEOUT => min($timeout, 2),
++                CURLOPT_TIMEOUT        => $timeout,
++            ]
++        );
++        $response = curl_exec($curl);
++        $code = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
++        $error = curl_error($curl);
++        curl_close($curl);
++        if ($response === false) {
++            error_log('Content provider request failed: ' . $error);
++            return self::_unavailable('The content provider is unavailable.');
++        }
++        $decoded = is_string($response) ? json_decode($response, true) : null;
++
++        if (
++            is_array($decoded)
++            && $code === 200
++            && ($decoded['state'] ?? null) === 'ready'
++        ) {
++            return ['state' => 'ready'];
++        }
++        if (
++            is_array($decoded)
++            && $code === 202
++            && ($decoded['state'] ?? null) === 'pending'
++        ) {
++            return [
++                'state'      => 'pending',
++                'message'    => self::_message($decoded, 'Content is being prepared.'),
++                'retryAfter' => self::_retryAfter($decoded['retryAfter'] ?? null),
++            ];
++        }
++        if (
++            is_array($decoded)
++            && $code === 404
++            && ($decoded['state'] ?? null) === 'unavailable'
++        ) {
++            return self::_unavailable(
++                self::_message($decoded, 'Content is unavailable.')
++            );
++        }
++        error_log('Content provider returned an invalid response. HTTP ' . $code);
++        return self::_unavailable('The content provider returned an invalid response.');
++    }
++
++    private static function _message(array $response, string $fallback): string
++    {
++        $message = $response['message'] ?? null;
++        return is_string($message) && $message !== ''
++            ? substr($message, 0, 500) : $fallback;
++    }
++
++    private static function _retryAfter($value): int
++    {
++        if (!is_numeric($value)) {
++            return 5;
++        }
++        return min(max((int)$value, 1), self::MAX_RETRY_AFTER);
++    }
++
++    private static function _pending(string $message): array
++    {
++        return ['state' => 'pending', 'message' => $message, 'retryAfter' => 1];
++    }
++
++    private static function _unavailable(string $message): array
++    {
++        return ['state' => 'unavailable', 'message' => $message, 'retryAfter' => 60];
++    }
++
++    private static function _normalize(string $path): string
++    {
++        $parts = [];
++        foreach (explode('/', $path) as $part) {
++            if ($part === '' || $part === '.') {
++                continue;
++            }
++            if ($part === '..') {
++                array_pop($parts);
++                continue;
++            }
++            $parts[] = $part;
++        }
++        return '/' . implode('/', $parts);
++    }
++}

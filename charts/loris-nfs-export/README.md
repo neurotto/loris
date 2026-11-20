@@ -3,10 +3,11 @@
 Expose an approved site directory as a **read-only NFSv4 export** for a central
 [LORIS](https://loris.ca/) deployment. The chart runs the custom
 `docker.io/scilus/loris-nfs-export:0.3.0` image, based on NFS-Ganesha with its VFS
-backend. Chart latest version: **0.1.0**.
+backend. Chart latest version: **0.1.1**.
 
-> **Disabled by default:** no resources are rendered unless both `dataPath` and
-> a nonempty `allowedClientCIDRs` are provided. Enabling the exporter also
+> **Disabled by default:** no resources are rendered when both `dataPath` and
+> `allowedClientCIDRs` are empty. Set both to enable the exporter; a partial
+> configuration fails during rendering. Enabling the exporter also
 > requires the source's owning group ID (`exportGid`) and a valid node hostname.
 > This is a site-side development integration, not a production security
 > certification or a complete LORIS deployment.
@@ -71,17 +72,31 @@ this shared-root layout, not a dataset directly at `/bids`. Existing single-data
 exports require a coordinated path/record migration before their root changes.
 
 Choose the source's **existing owning group** for `exportGid`, and a nonzero
-`exportUid` (default `10001`). Ganesha's VFS permission checks use mode bits, not
-named POSIX ACLs. A named-user ACL alone is not sufficient; the intended group
-must have read permission on files and read/traverse permission on directories.
-Account for ancestor access, mixed ownership, and any filesystem-specific
-restrictions. Obtain site-owner approval before changing permissions; the chart
-does not change source ownership or permissions.
+`exportUid` (default `10001`). Ganesha's VFS permission checks use filesystem
+mode bits; named POSIX ACL entries are not a substitute for the configured
+identity's mode-bit access. For each file or directory, the applicable class is
+owner when `exportUid` owns it, otherwise group when `exportGid` owns it,
+otherwise other. The owning group needs read permission on regular files and
+read plus traverse (`r-x`) on directories throughout the tree. Account for mixed
+ownership and filesystem-specific restrictions. Obtain site-owner approval
+before changing permissions; the chart does not change source ownership or
+permissions.
 
-The repository's legacy `prepare-source.sh` helper is **not a supported setup
-step**: it currently has a shell syntax error and describes ACL-based preparation
-that does not replace the group-mode requirement above. The audit scans it and
-reports the defect. Do not run it against research data.
+The optional `prepare-source.sh` helper is a **read-only preflight**. It checks
+the whole tree's applicable mode bits for the configured anonymous UID/GID and
+confirms there is no write bit for that identity. It intentionally does not use
+POSIX ACL grants or supplementary groups. Symlinks require manual review. The
+helper never changes ACLs, ownership, or permissions. Run it against a
+disposable fixture before using it for an approved source:
+
+```sh
+sudo bash ./charts/loris-nfs-export/prepare-source.sh \
+  10001 2000 /srv/approved-bids
+```
+
+Run as root if needed to enumerate the complete tree. Do not apply broad `chmod`
+or ACL changes to research data just to make the check pass; coordinate any
+permission changes with the source owner.
 
 ## Installation
 
@@ -116,9 +131,9 @@ exportGid: 2000
 ```
 
 `192.0.2.10` is a documentation address, not a usable client in your environment.
-Use trusted operator values only: the chart joins the CIDR strings into Ganesha
-configuration without validating CIDR syntax. Use a nonzero group ID; quote it
-if necessary to distinguish it from an unset value.
+The chart validates IPv4/IPv6 CIDR syntax and prefix lengths, but cannot verify
+that a client address is trusted or routable. Use narrow, trusted CIDRs and a
+nonzero group ID; quote the group ID if necessary to distinguish it from unset.
 
 ### 3. Install
 
@@ -174,12 +189,12 @@ Mounting files does not register candidates or scans in LORIS.
 | Value                         | Default                               | Description                                                                                     |
 | ----------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `siteName`                  | `site`                              | Deployment/label suffix. Use a short, unique lowercase DNS label.                               |
-| `nodeHostname`              | `""`                                | Exact `kubernetes.io/hostname` label of the source node; required operationally when enabled. |
-| `dataPath`                  | `""`                                | Existing approved absolute host directory. Empty prevents resource creation.                    |
-| `allowedClientCIDRs`        | `[]`                                | Approved NFS client-node CIDRs. Empty prevents resource creation.                               |
-| `nfsPort`                   | `20490`                             | Container and node TCP port. Entrypoint accepts `1024`–`65535`.                            |
-| `exportUid`                 | `10001`                             | Nonzero anonymous UID for all client requests.                                                  |
-| `exportGid`                 | `""`                                | Required nonzero owning group ID granting source read/traverse.                                 |
+| `nodeHostname`              | `""`                                | Exact `kubernetes.io/hostname` label (1–63 characters); required when enabled.                  |
+| `dataPath`                  | `""`                                | Existing absolute, non-root host directory without `..` path components. Empty disables chart.  |
+| `allowedClientCIDRs`        | `[]`                                | Valid IPv4/IPv6 CIDRs; empty disables chart. Both this and `dataPath` are required to enable it. |
+| `nfsPort`                   | `20490`                             | Integer TCP port from `1024` through `65535`.                                                   |
+| `exportUid`                 | `10001`                             | Nonzero integer anonymous UID (maximum `2147483647`) for all client requests.                   |
+| `exportGid`                  | `""`                                | Required nonzero integer (maximum `2147483647`) owning group ID when enabled.                   |
 | `image.repository`          | `docker.io/scilus/loris-nfs-export` | Custom image repository; must provide its entrypoint and Ganesha VFS dependencies.              |
 | `image.tag`                 | `0.3.0`                             | Image tag; chart has no separate digest value.                                                  |
 | `image.pullPolicy`          | `IfNotPresent`                      | Image pull policy.                                                                              |
@@ -224,7 +239,8 @@ kubectl -n loris-export logs deployment/loris-nfs-export-example-site \
   -c nfs-ganesha
 ```
 
-- **No resources:** ensure both `dataPath` and `allowedClientCIDRs` are nonempty.
+- **No resources:** the chart is disabled only when both `dataPath` and
+  `allowedClientCIDRs` are empty. Supplying only one is a render error.
 - **Helm render fails:** provide `exportGid`; inspect types and rendered values.
 - **Pending:** inspect the hostname label, admission decisions, and host-port
   conflicts.
@@ -249,6 +265,21 @@ helm uninstall loris-nfs-export --namespace loris-export
 Removing the release stops export access and removes ephemeral Ganesha state.
 It does **not** delete the host source directory. Disable or unmount central
 consumers first and coordinate any path changes with existing LORIS registrations.
+
+## Focused chart tests
+
+From the repository root, run the focused render checks, chart lint, and
+fixture-only helper checks:
+
+```sh
+bash charts/loris-nfs-export/tests/render.sh
+helm lint charts/loris-nfs-export
+bash -n charts/loris-nfs-export/prepare-source.sh
+bash charts/loris-nfs-export/tests/prepare-source.sh
+```
+
+The helper test creates and removes its own fixture under the chart's `tests/`
+directory; it does not read or modify site data.
 
 ## Security audit
 

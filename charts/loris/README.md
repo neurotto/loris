@@ -6,9 +6,9 @@ dataset mounts.
 
 This chart packages a **development deployment**, not a production-certified
 LORIS installation. It uses a custom image containing LORIS and LORIS-MRI
-**29.0.0**, an automated installer, and viewer, Module Manager and on-demand
-site content patches.
-Chart version: **0.3.1**.
+**29.0.0**, an automated installer, and viewer, Module Manager and
+provider-neutral content patches.
+Chart version: **0.5.0**.
 
 > **Important:** The chart is disabled by default (`enabled: false`). Enabling it
 > without configuring persistence uses ephemeral storage for the database,
@@ -22,8 +22,7 @@ Chart version: **0.3.1**.
   configuration setup.
 - Configurable persistent storage or existing claims for all writable state.
 - Optional ingress at the root of a dedicated hostname.
-- Optional read-only BIDS site mounts: NFSv4.1 exports, or central git-annex
-  clones kept on the LORIS data volume by an external sync job.
+- Optional read-only BIDS site mounts from NFSv4.1 exports or existing claims.
 - Optional scheduled dataset discovery and ledger-backed import Jobs using the
   LORIS-MRI `--no-copy` importer.
 - A database ingress NetworkPolicy and Argo CD sync-wave annotations.
@@ -33,7 +32,7 @@ Chart version: **0.3.1**.
 - Helm 3 and a Kubernetes cluster supporting `apps/v1`, `batch/v1`, and
   `networking.k8s.io/v1`. Scheduled imports use CronJob `spec.timeZone`; Kubernetes
   1.27 or later is recommended when enabling them.
-- Pull access to `docker.io/scilus/loris:29.0.0` and `mariadb:10.11.10`.
+- Pull access to `docker.io/scilus/loris:29.0.0-chart0.5.0` and `mariadb:10.11.10`.
   Confirm image availability before installation. A replacement LORIS image must
   retain the chart's bootstrap scripts, runtime dependencies, and patches; an
   arbitrary upstream image is not interchangeable.
@@ -48,8 +47,10 @@ Chart version: **0.3.1**.
   UID/GID 33 (`www-data`).
 - For ingress: an ingress controller, DNS, and a TLS Secret or certificate
   provisioning mechanism.
-- For site mounts: NFS client support on eligible Kubernetes nodes, network access
-  from those nodes to each server, and permission to create cluster-scoped PVs.
+- For NFS site mounts: NFS client support on eligible Kubernetes nodes, network
+  access from those nodes to each server, and permission to create cluster-scoped
+  PVs. PVC site mounts only need an existing claim the portal and import Pods can
+  mount.
 - A CNI that enforces NetworkPolicy for the database policy to take effect.
 
 Resource names such as `loris` and `loris-mariadb` are fixed rather than derived
@@ -222,12 +223,19 @@ existing deployment to another URL.
 ## Read-only BIDS site mounts
 
 Site storage is optional (`sites: []`). Each enabled site is mounted read-only in
-the portal and import Pods at the same path, whatever its `source`:
+the portal and import Pods at the same path:
 
 - `source: nfs` (default): an existing NFSv4.1 export. The chart creates the PV/PVC;
   it does **not** deploy an NFS server or configure a site's firewall.
-- `source: clone`: a central git-annex (DataLad) clone directory on the LORIS data
-  volume. See [Clone-sourced sites](#clone-sourced-sites).
+- `source: pvc`: a directory on an existing PersistentVolumeClaim in the release
+  namespace, for example a copy of site data that another workload synchronizes
+  inside the cluster. The chart creates no PV/PVC for it and never writes to it.
+
+`source: pvc` lets you keep the central cluster from opening connections into site
+networks: sites push data to a service you operate, which writes a copy to a
+claim that LORIS mounts read-only. Content that is not yet present (for example a
+dangling symlink in a partial copy) can be fetched on demand through
+[`contentProvider.url`](#provider-neutral-on-demand-content).
 
 Each enabled site is mounted at:
 
@@ -248,16 +256,26 @@ sites:
     siteAlias: EX
     bidsImport:
       enabled: false
+  - name: synced-site
+    enabled: true
+    source: pvc
+    claimName: site-copies
+    subPath: sites/synced-site
+    siteAlias: SYNC
 ```
+
+Both forms expose the same layout: dataset folders directly below the site root.
 
 | Site field     | Default                            | Description                                                                                               |
 | -------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `name`       | Required                           | Unique lowercase DNS label, at most 40 characters; also used for the LORIS site name and mount directory. |
 | `enabled`    | Set explicitly                     | Mount the site in the portal (and create its PV/PVC for NFS sources).                                     |
-| `source`     | `nfs`                              | `nfs` or `clone`.                                                                                         |
-| `server`     | Required for enabled NFS sites     | NFS server address reachable from eligible cluster nodes.                                                 |
-| `nfsPort`    | `20490`                          | NFS TCP port.                                                                                             |
-| `capacity`   | `1Ti`                            | Declared PV/PVC capacity, not an enforced NFS quota.                                                      |
+| `source`     | `nfs`                              | `nfs` or `pvc`.                                                                                           |
+| `server`     | Required for enabled NFS sites     | NFS server address reachable from eligible cluster nodes. NFS only.                                       |
+| `nfsPort`    | `20490`                          | NFS TCP port. NFS only.                                                                                   |
+| `capacity`   | `1Ti`                            | Declared PV/PVC capacity, not an enforced NFS quota. NFS only.                                            |
+| `claimName`  | Required for enabled PVC sites     | Existing claim in the release namespace. PVC only.                                                        |
+| `subPath`    | Claim root                         | Relative directory inside the claim, without `..`. PVC only.                                              |
 | `siteAlias`  | Required for imports               | Unique 1–4 character LORIS site alias.                                                                   |
 | `bidsImport` | Disabled unless enabled explicitly | Site-specific discovery and registration settings.                                                        |
 
@@ -268,6 +286,12 @@ access. Verify node-to-server reachability and read-only behavior before enablin
 the site. An unavailable NFS mount can prevent the portal Pod from starting;
 soft-mount read failures also need operational monitoring.
 
+For PVC sites, the claim's access mode and scheduling must let the portal and
+import Pods mount it alongside its writer; the mount is read-only in LORIS
+containers, so write protection of the source is the writer's responsibility.
+A claim may be the LORIS data claim itself, with `subPath` pointing outside the
+directories LORIS writes.
+
 Network isolation, source authorization, and encrypted transport must be
 provided separately. The chart does not configure NFS transport encryption or
 per-site authentication. Only export approved, appropriately de-identified data.
@@ -275,107 +299,91 @@ per-site authentication. Only export approved, appropriately de-identified data.
 Mounting a dataset does not register it in LORIS. Read-only site storage must not
 be used for writable upload staging, temporary files, or pipeline outputs.
 
-### Clone-sourced sites
+### Provider-neutral on-demand content
 
-With `source: clone`, the site directory is
-`<siteClones.subPath>/<site-name>` on the LORIS data PVC (default
-`re-move/clones/<site-name>`), outside the LORIS `data/` tree. It is mounted
-read-only (a `subPath` of the data volume) at the usual site path, so no PV, NFS
-client or site network access is needed and imports keep their read-only check.
-Clone sources require `loris.data.persistence.enabled`.
+Set `contentProvider.url` to opt in to an external content provider. The chart
+does not deploy that service or depend on a particular backend.
 
-The chart only prepares the directory: the portal init container creates it, owned
-by `www-data` (UID 33). An external job, such as the RE-MOVE sync job, keeps one
-git-annex clone per dataset in it (`<site>/<dataset>/`, with locked annexed files)
-and must write as UID 33. Annexed content may be absent: dataset metadata
-(`dataset_description.json`, `participants.tsv`, sidecars) must stay present, and
-imaging content only needs to be present while it is imported or viewed.
+The provider implements two JSON POST endpoints:
 
-For clone sources:
+| Endpoint | Request body | Ready | Pending | Terminal |
+| -------- | ------------ | ----- | ------- | -------- |
+| `/content` | `{"path":"<site>/<dataset>/<relative-file>"}` | HTTP 200 `{"state":"ready"}` | HTTP 202 `{"state":"pending","message":"...","retryAfter":1}` | HTTP 404 `{"state":"unavailable","message":"..."}` |
+| `/chunks` | `{"path":"<site>/<dataset>/<relative-file>","chunkPath":"content-provider-chunks/<site>/<dataset>/<sha256>.chunks"}` | HTTP 200 `{"state":"ready"}` | HTTP 202 `{"state":"pending","message":"...","retryAfter":1}` | HTTP 404 `{"state":"unavailable","message":"..."}` |
 
-- fingerprints hash git-annex keys (already content hashes) instead of reading
-  content, and skip `.git`, so discovery works with content dropped;
-- import views link annexed files to their annex object paths, which do not
-  depend on content presence;
-- a dataset whose fingerprint changed is re-armed and imported again. Additions
-  (new subjects, sessions or files) are added to the existing import view and
-  imported; files already registered are skipped without reading them. Removed or
-  changed files that LORIS already registered stop the attempt with a review error.
+`retryAfter` is clamped to 1–60 seconds. Any malformed or unexpected response,
+or a provider timeout, is treated as terminal unavailable; LORIS does not retry
+that request. The provider must make ready content visible at its existing path
+under `/data/loris/data/assembly_bids` and ready EEG chunks visible at
+`chunkPath/index.json`. It therefore needs access to the corresponding storage;
+the chart only supplies the URL and creates the chunk directory. Imaging and EEG
+viewers stop retrying after five minutes, and their waits can be cancelled when
+the page or viewer is closed.
 
-#### On-demand imaging content
+If the provider reports ready before the shared filesystem exposes the file,
+LORIS continues returning pending with a one-second retry interval. This wait
+is subject to the same viewer deadline.
 
-Images of clone-sourced sites stay at the site. Set `siteClones.cacheURL` to the
-base URL of a content cache service (the RE-MOVE `re-move-cache`, for example
-`http://re-move-cache.re-move-central.svc.cluster.local:8080`) to fetch them when
-they are viewed. The portal then receives `RE_MOVE_CACHE_URL` and
-`RE_MOVE_CLONE_ROOT=/data/loris/data/assembly_bids`, and the image patch
-(`image/re-move-annex-content.patch`) changes three endpoints:
+For EEG, give the external provider write access to the same persistent
+directory LORIS reads at `/data/loris/data/content-provider-chunks`. For example,
+when using `loris.data.persistence.existingClaim`, mount that claim in the
+provider with `subPath: data/content-provider-chunks`. The provider's mount path
+is its own choice; its output must appear at the requested `chunkPath` inside
+LORIS. The chart does not attach a provider's separate volume automatically.
+Choose storage access modes and scheduling that permit both workloads to mount
+the claim.
 
-- the API image endpoint (`/api/v0.0.3/candidates/<id>/<visit>/images/<file>`) and
-  BrainBrowser's `imageinfo` follow the file's symlinks. When the target is a
-  git-annex object of a clone below `RE_MOVE_CLONE_ROOT` and its content is absent,
-  they `POST /content` `{site, dataset, key}` to the cache and answer
-  **HTTP 503** with a `Retry-After` header and a JSON body
-  `{error, state, retryAfter}` instead of 404. `state` is `fetching` (try again) or
-  `unavailable` (for example, the site is offline or has no copy);
-- serving present content sends a best-effort access notice (1 s timeout) so the
-  cache keeps recently viewed content longer;
-- BrainBrowser shows the cache message with the elapsed time and retries after
-  `Retry-After` while the state is `fetching`, then loads the volumes; other errors
-  are shown in place of the viewer.
+The chunk path is derived from the SHA-256 digest of the recording's path below
+its site and dataset. It contains no provider-specific identifiers.
 
-The site, dataset and key are derived from the symlink targets, never from the
-request. Files that are not annexed in a site clone, and portals without
-`cacheURL` (the default), behave as before. Thumbnails are generated at import and
-kept, so session pages do not need the content. The cache, not the chart, decides
-how long content stays; the portal Pod needs network access to it.
+| Value                 | Default | Description                                  |
+| --------------------- | ------- | -------------------------------------------- |
+| `contentProvider.url` | `""`    | `http(s)://host[:port]` for the generic provider contract. |
 
-| Value                   | Default          | Description                                                       |
-| ----------------------- | ---------------- | ----------------------------------------------------------------- |
-| `siteClones.subPath`  | `re-move/clones` | Clone directory on the LORIS data PVC.                            |
-| `siteClones.cacheURL` | `""`             | `http(s)://host[:port]` of the content cache; empty disables it.   |
+### Migration from chart 0.3.x
 
-#### Moving an imported NFS site to a clone source
+Chart 0.5.0 removes `sites[].source: clone`, `siteClones.*`, the legacy
+clone-cache image patch, clone-specific BIDS import behavior, and the bundled
+maintenance tools for those integrations. Existing values using these settings
+must not be carried forward unchanged: the Helm templates reject
+`source: clone` and `siteClones`.
 
-LORIS registrations point at files in the site's import view
-(`assembly_bids/import-<...>`), and the view links point at the mounted
-dataset. After switching a site from `source: nfs` to `source: clone`, annexed
-files resolve to `.git/annex/objects/...` in the clone instead of plain dataset
-paths. The importer then refuses the view with "removed or changed source files
-need review". `bids_clone_migrate.py`, shipped in the runtime profile ConfigMap,
-relinks an existing view without changing the database or site data:
+Before upgrading, pause site discovery and any external clone synchronization,
+and back up the LORIS database and persistent data. Then choose one of:
 
-```bash
-# While the NFS mount is still present, record every view link and its hashes.
-python3 /import-profile/bids_clone_migrate.py prepare \
-  --view /data/loris/data/assembly_bids/import-<view> \
-  --source /data/loris/data/assembly_bids/<site>/<dataset> \
-  --journal /data/loris/data/clone-migration-<site>.json
+- **Keep the in-cluster copies:** set each former clone site to `source: pvc`
+  with the claim that holds the copies and `subPath: <siteClones.subPath>/<site>`
+  (for example `claimName: loris-data`, `subPath: re-move/clones/<site>` with the
+  former defaults). The mount path is unchanged and no site network access is
+  added. To keep on-demand fetching of absent content, point
+  `contentProvider.url` at a service implementing the provider contract instead
+  of `siteClones.cacheURL`. If the copies keep file contents behind in-dataset
+  symlinks that may be dropped, set `bidsImport.symlinkedContent: identity`;
+  if they grow through synchronization, set `bidsImport.updates: additive`.
+- **Switch to NFS:** provision and verify a replacement NFS export with the same
+  site/dataset layout and read-only access, then set `source: nfs` with its
+  server configuration.
 
-# After switching to clone source and checking out the clone, verify first.
-python3 /import-profile/bids_clone_migrate.py apply \
-  --journal /data/loris/data/clone-migration-<site>.json
+`contentProvider.url` only implements the provider-neutral on-demand content
+contract; it does not provide site storage or migrate clone data.
 
-# Relink only after reviewing a clean verification report.
-python3 /import-profile/bids_clone_migrate.py apply \
-  --journal /data/loris/data/clone-migration-<site>.json \
-  --write --clone /data/loris/re-move/clones/<site>/<dataset>
-
-# To undo, restore the NFS mount before restoring the original links.
-python3 /import-profile/bids_clone_migrate.py rollback \
-  --journal /data/loris/data/clone-migration-<site>.json --write
-```
-
-`prepare` writes a mode-0600 journal and refuses to overwrite an existing one.
-`apply` verifies each target against the recorded size and hashes. Annexed files
-are verified against their git-annex key without fetching their content; other
-files are hashed. Missing, changed, or unverifiable files stop the operation
-before any links are changed. `--write` atomically replaces links and records
-the new targets, so interrupted runs can be resumed. With `--clone`, it also
-sets `refs/re-move/imported` under the dataset lock only if every annexed file
-in the clone has been verified. This lets the sync job stage later additions
-without re-staging the existing dataset. The next discovery re-arms the dataset
-because its fingerprint changed; registered files are skipped by the importer.
+Existing import views may contain links into clone-specific object paths, and
+their registrations may refer to those paths. The chart does not migrate those
+database records or views. Keep the prior deployment and clone data available
+until you have a separately reviewed migration or restore strategy. Source
+fingerprints now hash file paths and either contents or, with
+`symlinkedContent: identity`, symlink targets. The first discovery after the
+upgrade therefore sees a changed fingerprint: it is rejected for review unless
+`updates: additive` is set, in which case the dataset is re-armed, already
+registered files are skipped, and legacy view links to the same final file are
+upgraded in place. Legacy links that reach another file are rejected. Because
+no per-file digests exist yet, each such dataset is first rejected with its new
+fingerprint; verify that its imported files are unchanged before setting
+`acceptFingerprint` as described in
+[Symlinked content and additive updates](#symlinked-content-and-additive-updates).
+Rollback requires restoring the prior chart version, values, image and clone
+storage together. Do not remove the old storage until the upgraded portal and
+all affected registered files have been verified.
 
 ## Scheduled BIDS discovery and import
 
@@ -433,6 +441,14 @@ EEG uses the upstream EEG importer, `physiological_file`/`physiological_archive`
 records and the separate `electrophysiology_browser` module. That browser is
 kept active alongside the API and imaging viewers. Automatic BIDS imports do not
 require enabling the manual `electrophysiology_uploader`.
+
+Without a content provider, BrainVision and BDF recordings are chunked locally
+using MNE and LORIS's chunk writer. Other supported formats retain upstream
+chunk generation. Generated chunks live on writable application storage, never
+on the read-only site export.
+The chart-compatible image fixes the pinned chunk writer's swapped sample-count
+and downsampling metadata fields. Use `29.0.0-chart0.5.0` or a verified derivative,
+not the older `29.0.0` image tag.
 
 Discovery ignores hidden directories and the root `derivatives` directory.
 Symlinked dataset directories are rejected. Dataset overrides are **not an
@@ -522,14 +538,14 @@ Kubernetes Job history. Imports use database locking to serialize shared-state
 changes; failed or deferred attempts can be retried on subsequent discovery.
 Already completed modes are skipped.
 
-Dataset identity is the site/folder pair. Changes to dataset names or
-registration identity are rejected rather than silently reimported; investigate
-and plan an explicit migration. Changed NFS source fingerprints are rejected the
-same way; clone sources import additive updates instead (see
-[Clone-sourced sites](#clone-sourced-sites)). Imports commit incrementally: a
-failed attempt does not roll back previously registered scans. NFS fingerprinting
-reads the included dataset contents, even during discovery; account for source
-size and network throughput when choosing the schedule and Job deadline.
+Dataset identity is the site/folder pair. Changes to dataset names,
+registration identity, or source fingerprints are rejected rather than silently
+reimported, unless a site opts in to additive updates (below); investigate and
+plan an explicit migration. Imports commit
+incrementally: a failed attempt does not roll back previously registered scans.
+Fingerprinting reads the included dataset contents, even during discovery;
+account for source size and network throughput when choosing the schedule and
+Job deadline.
 
 | Scheduling value                       | Default         | Description                                               |
 | -------------------------------------- | --------------- | --------------------------------------------------------- |
@@ -541,12 +557,62 @@ size and network throughput when choosing the schedule and Job deadline.
 | `bidsImport.ttlSecondsAfterFinished` | `604800`      | Finished Job retention in seconds (seven days).           |
 
 Sites can override `schedule`, `timeZone`, and `suspend` inside their
-`bidsImport` section. Dataset overrides can set registration fields and `enabled`,
-but not scheduling fields. Jobs use `backoffLimit: 0`; the discovery CronJob uses
+`bidsImport` section. Dataset overrides can set registration fields, `enabled`, and
+`acceptFingerprint` (below), but not scheduling fields. Jobs use `backoffLimit: 0`; the discovery CronJob uses
 `concurrencyPolicy: Forbid`, retains one successful and three failed discovery
 Jobs, and uses a dedicated ServiceAccount with namespace-scoped Job/ConfigMap
 permissions. Its ledger initializer uses the database root credential; workers
 have application credentials and no mounted service-account token.
+
+### Symlinked content and additive updates
+
+Two site-level `bidsImport` options support sources whose files are symlinks
+into a content store inside the dataset and whose datasets grow over time. Both
+are opt-in and cannot be set per dataset.
+
+| Site value | Default | Description |
+| ---------- | ------- | ----------- |
+| `sites[].bidsImport.symlinkedContent` | `resolve` | `resolve` follows file symlinks and requires their content. `identity` fingerprints a file symlink by its target path and links import views to the source path, so content may be absent. |
+| `sites[].bidsImport.updates` | `reject` | `reject` sends changed fingerprints to review. `additive` lets an idle dataset re-import after files are added; changed or removed imported files are still rejected. |
+
+With `identity`, a symlink target must stay inside the dataset and must not
+pass through further symlinks, including symlinked directories; if the target
+exists, it must be a regular file. A store that replaces file contents without
+changing the target path is not detected. Pair absent content with
+`contentProvider.url` so viewers can request it. New acquisitions still need
+their content present when they are imported; files already registered are not
+read again. Metadata such as `dataset_description.json`, `participants.tsv`, and
+sidecars must always be present.
+
+With `additive`, the import ledger records a digest for every dataset file
+(the content, or the symlink target with `identity`). A changed fingerprint
+re-arms the dataset only if every recorded file except `participants.tsv` is
+still present and unchanged; otherwise discovery rejects it for review. The
+re-arm resets completed modes and sets the status to `updated`, and the next
+discovery creates an import attempt that registers only the additions. An
+active import still blocks the update. Import views are extended in place;
+existing view links that already point to the same final file are rewritten to
+the current link form.
+
+Datasets enrolled before `additive` was enabled, or by an earlier chart
+version, receive their digests at the first discovery where their fingerprint
+is unchanged. If the fingerprint has already changed by then, discovery
+rejects the dataset and reports its new fingerprint. After verifying that the
+files already imported are unchanged, accept exactly that state:
+
+```yaml
+sites:
+  - name: example-site
+    bidsImport:
+      updates: additive
+      datasets:
+        example-dataset:
+          acceptFingerprint: <64-character fingerprint from the discovery error>
+```
+
+The value only applies while no digests are recorded and only to that exact
+fingerprint; any later change needs no new value and is checked against the
+recorded digests. It requires `updates: additive`.
 
 ## Configuration reference
 
@@ -557,7 +623,7 @@ values are listed below.
 | ------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | `enabled`                           | `false`                                             | Render chart resources. With the default, no workloads are created.                          |
 | `image.repository`                  | `docker.io/scilus/loris`                            | Custom LORIS image repository.                                                               |
-| `image.tag`                         | `29.0.0`                                            | Image tag.                                                                                   |
+| `image.tag`                         | `29.0.0-chart0.5.0`                                 | Chart-compatible image tag; the LORIS application remains 29.0.0.                              |
 | `image.digest`                      | `""`                                                | Optional `sha256:` digest with 64 lowercase hexadecimal characters; pins content when set. |
 | `image.pullPolicy`                  | `IfNotPresent`                                      | Pull policy for portal and import containers.                                                |
 | `database.image`                    | `mariadb:10.11.10`                                  | Bundled database image; pulled with `IfNotPresent`.                                        |
@@ -571,7 +637,7 @@ values are listed below.
 | `loris.databaseUser`                | `loris`                                             | Application database username.                                                               |
 | `loris.adminUser`                   | `admin`                                             | Initial frontend administrator username.                                                     |
 | `loris.publicUrl`                   | `http://loris.local`                                | Absolute public URL used during bootstrap; use a dedicated hostname with no sub-path.        |
-| `siteClones.subPath`                | `re-move/clones`                                    | Relative LORIS data-PVC directory holding clone-sourced sites; must not start with `data`.   |
+| `contentProvider.url`              | `""`                                                | Optional provider-neutral on-demand content service URL.                                    |
 | `loris.additionalRequiredModules`   | `[]`                                                | Additional module names to keep active.                                                      |
 | `loris.servicePort`                 | `80`                                                | ClusterIP Service port; container HTTP port remains 80.                                      |
 | `loris.replicas`                    | `1`                                                 | Portal replicas; one is recommended.                                                         |
@@ -723,11 +789,11 @@ Tests live in the repository's `tests/` directory:
 
 | Command                                              | Needs                                                  | Covers                                          |
 | ---------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------- |
-| `python3 -m pytest tests --ignore tests/test_loris_bids_setup.py` | Python 3.12+, `sqlalchemy>=2`, `pytest`, `git-annex` | Discovery ledger, fingerprints, import views, NFS-to-clone view migration. |
+| `python3 -m pytest tests --ignore tests/test_loris_bids_setup.py` | Python 3.12+, `sqlalchemy>=2`, `pytest` | Discovery ledger, content fingerprints, review-gated import views, and provider chunk paths. |
 | `bash tests/test_loris_chart.sh`                     | `helm`, jq-compatible `yq` (Debian package `yq`)        | Rendered resources and values validation.       |
-| `bash tests/test_loris_bids_integration.sh`          | Docker, the `scilus/loris:29.0.0` and `mariadb:10.11.10` images | All `test_loris_bids_*` suites, including real LORIS-MRI imports, in the image. |
+| `bash tests/test_loris_bids_integration.sh`          | Docker, the `scilus/loris:29.0.0-chart0.5.0` and `mariadb:10.11.10` images | All `test_loris_bids_*` suites, including real LORIS-MRI imports, in the image. |
 | `node tests/test_loris_brainbrowser.js`              | Node.js, Docker                                        | BrainBrowser React mount and on-demand content retry patches. |
-| `bash tests/test_loris_annex_content.sh`             | Docker, an image built with `re-move-annex-content.patch` | On-demand content lookup, cache requests, and cold/warm BrainBrowser metadata responses with a single-pass database cursor. |
+| `bash tests/test_loris_content_provider.sh`          | Docker, an image built with `content-provider.patch` | Provider contract: ready, pending, unavailable, malformed responses, timeout, path validation, and EEG chunks. |
 | `bash tests/test_loris_diagnostics.sh`, `bash tests/test_loris_module_manager.sh` | A running local portal (`run-local.sh`) | Diagnostics and Module Manager guards.          |
 
 ## Upstream documentation

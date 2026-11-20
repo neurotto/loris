@@ -2,106 +2,91 @@
 set -euo pipefail
 
 usage() {
+    printf 'Usage: %s EXPORT_UID EXPORT_GID ABSOLUTE_SOURCE_PATH\n' "${0##*/}" >&2
     printf '%s\n' \
-        'Usage: sudo bash prepare-source.sh [--apply] [--uid UID] [PATH]' \
-        'Makes a site BIDS copy read-only and grants the LORIS exporter UID read/traverse access.' \
-        'PATH defaults to /braindata/processing/re-move-site/Penthera_3T; UID defaults to 10001.' \
-        'Without --apply, prints the planned changes and current access check only.' \
-        'Ownership is unchanged. Requires setfacl/getfacl (acl package) and setpriv (util-linux).'
+        'Read-only preflight for Ganesha mode-bit access; it never changes the source.' \
+        'Run as root if needed to enumerate the complete tree.' >&2
 }
 
-apply=false
-uid=10001
-path=/braindata/processing/re-move-site/Penthera_3T
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --apply) apply=true; shift ;;
-        --uid) don.\n' >&2; exit 1; }
-path=$(realpath -e -- "$path")
-[[ -d "$path" ]] || { printf 'ERROR: %s is not a directory.\n' "$path" >&2; exit 1; }
-[[ "$(dirname -- "$path")" != / ]] || { printf 'ERROR: refusing to modify a top-level directory.\n' >&2; exit 1; }
-for tool in setfacl getfacl setpriv find; do
-    command -v "$tool" >/dev/null 2>&1 || { printf 'ERROR: %s is required.\n' "$tool" >&2; exit 1; }
-done
-
-as_uid() {
-    # cd / avoids failures from the caller's working directory being inaccessible to the exporter UID.
-    setpriv --reuid="$uid" --regid="$uid" --clear-groups -- sh -c 'cd / && shift && exec "$@"' sh _ "$@"
+fail() {
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 1
 }
 
-check_access() {
-    # Runs as the exporter UID with no supplementary groups, like the container.
-    if as_uid sh -c 'test -r "$1" && test -x "$1" && find "$1" -mindepth 1 -maxdepth 1 -print -quit >/dev/null' sh "$path"; then
-        printf 'UID %s: can read, traverse, and list %s\n' "$uid" "$path"
-        return 0
+[[ $# -eq 3 ]] || { usage; exit 2; }
+
+uid_text=$1
+gid_text=$2
+source_path=$3
+[[ $uid_text =~ ^[0-9]+$ ]] || fail 'EXPORT_UID must be a nonzero integer.'
+[[ $gid_text =~ ^[0-9]+$ ]] || fail 'EXPORT_GID must be a nonzero integer.'
+[[ ${#uid_text} -le 10 && ${#gid_text} -le 10 ]] || fail 'UID and GID must not exceed 2147483647.'
+uid=$((10#$uid_text))
+gid=$((10#$gid_text))
+(( uid > 0 && uid <= 2147483647 )) || fail 'EXPORT_UID must be from 1 to 2147483647.'
+(( gid > 0 && gid <= 2147483647 )) || fail 'EXPORT_GID must be from 1 to 2147483647.'
+[[ $source_path == /* ]] || fail 'source path must be absolute.'
+[[ -d $source_path ]] || fail 'source path must exist and be a directory.'
+source_path=$(realpath -e -- "$source_path") || fail 'could not resolve source path.'
+[[ $source_path != / ]] || fail 'refusing to check the filesystem root.'
+
+mode_bits() {
+    local path=$1 mode owner group class
+    read -r mode owner group < <(stat -c '%a %u %g' -- "$path") ||
+        fail "could not read mode and ownership for $path"
+    [[ $mode =~ ^[0-7]{3,4}$ && $owner =~ ^[0-9]+$ && $group =~ ^[0-9]+$ ]] ||
+        fail "unsupported mode or ownership metadata for $path"
+    mode=${mode: -3}
+    if [[ $uid == "$owner" ]]; then
+        class=${mode:0:1}
+    elif [[ $gid == "$group" ]]; then
+        class=${mode:1:1}
+    else
+        class=${mode:2:1}
     fi
-    printf 'UID %s: cannot read/traverse/list %s\n' "$uid" "$path"
-    return 1
+    printf '%d\n' "$((8#$class))"
 }
 
-check_write_denied() {
-    local probe="$path/.loris-write-probe.$$"
-    as_uid true || { printf 'Cannot switch to UID %s; write check is inconclusive.\n' "$uid"; return 1; }
-    if as_uid sh -c ': > "$1"' sh "$probe" 2>/dev/null; then
-        rm -f -- "$probe"
-        printf 'UID %s: write was ALLOWED (unexpected)\n' "$uid"
+check_tree() {
+    local path bits
+    if ! find "$source_path" -print0 | while IFS= read -r -d '' path; do
+        if [[ -L $path ]]; then
+            printf 'Symlink requires manual permission review: %s\n' "$path" >&2
+            exit 1
+        elif [[ -d $path ]]; then
+            bits=$(mode_bits "$path") || exit 1
+            if (( (bits & 5) != 5 )); then
+                printf 'UID:GID %s:%s lacks directory read/traverse mode bits on %s\n' \
+                    "$uid" "$gid" "$path" >&2
+                exit 1
+            fi
+            if (( (bits & 2) != 0 )); then
+                printf 'UID:GID %s:%s has directory write mode bits on %s\n' \
+                    "$uid" "$gid" "$path" >&2
+                exit 1
+            fi
+        elif [[ -f $path ]]; then
+            bits=$(mode_bits "$path") || exit 1
+            if (( (bits & 4) != 4 )); then
+                printf 'UID:GID %s:%s lacks file read mode bits on %s\n' \
+                    "$uid" "$gid" "$path" >&2
+                exit 1
+            fi
+            if (( (bits & 2) != 0 )); then
+                printf 'UID:GID %s:%s has file write mode bits on %s\n' \
+                    "$uid" "$gid" "$path" >&2
+                exit 1
+            fi
+        fi
+    done; then
         return 1
     fi
-    printf 'UID %s: write denied, as expected\n' "$uid"
+    return 0
 }
 
-ancestors=()
-dir=$(dirname -- "$path")
-while [[ "$dir" != / ]]; do
-    ancestors=("$dir" "${ancestors[@]}")
-    dir=$(dirname -- "$dir")
-done
-
-# The group-class bits act as the mask once a named entry exists, so a missing x there blocks traversal.
-needs_mask_x() {
-    local class
-    class=$(getfacl -cp -- "$1" 2>/dev/null | awk -F: '$1 == "mask" {m = $3} $1 == "group" && $2 == "" {g = $3} END {print (m != "" ? m : g)}')
-    [[ "$class" != *x* ]]
-}
-
-if [[ "$apply" != true ]]; then
-    [[ $EUID -eq 0 ]] || { printf 'ERROR: run as root (sudo); the access check impersonates UID %s.\n' "$uid" >&2; exit 1; }
-    printf 'DRY RUN for %s (UID %s). Planned changes with --apply:\n' "$path" "$uid"
-    printf '  1. Remove write permission for owner and others on the whole tree (chmod -R u-w,o-w).\n'
-    printf '  2. Ensure group-class read/traverse (chmod -R g+rX); existing ACL entries and their write rights are kept.\n'
-    printf '  3. Grant user:%s r-X recursively without changing ACL masks.\n' "$uid"
-    printf '  4. Grant user:%s --x (traverse only) on ancestors:\n' "$uid"
-    printf '       %s\n' "${ancestors[@]}"
-    for dir in "${ancestors[@]}"; do
-        if needs_mask_x "$dir"; then
-            printf '     %s has no x in its ACL mask/group class; x will be added (group %s gains traverse-only, not listing).\n' \
-                "$dir" "$(stat -c %G -- "$dir")"
-        fi
-    done
-    printf '\nCurrent state:\n'
-    check_access || true
-    exit 0
+if ! check_tree; then
+    fail "UID:GID $uid:$gid does not meet the source-tree read-only mode-bit requirements."
 fi
 
-[[ $EUID -eq 0 ]] || { printf 'ERROR: --apply must run as root (sudo).\n' >&2; exit 1; }
-printf 'Making %s read-only for owner and others...\n' "$path"
-# With ACLs, g+rX only adds bits to the mask, so named entries keep their rights and groups keep read.
-chmod -R u-w,o-w,g+rX -- "$path"
-setfacl -R -n -m "u:${uid}:rX" -- "$path"
-for dir in "${ancestors[@]}"; do
-    add_x=false
-    needs_mask_x "$dir" && add_x=true
-    # -n keeps the existing mask so other named ACL users don't gain effective rights.
-    setfacl -n -m "u:${uid}:x" -- "$dir"
-    if [[ "$add_x" == true ]]; then
-        chmod g+x -- "$dir"
-        printf 'Added x to the ACL mask of %s (group %s gains traverse-only).\n' "$dir" "$(stat -c %G -- "$dir")"
-    fi
-done
-
-printf '\nVerification:\n'
-status=0
-check_access || status=1
-check_write_denied || status=1
-getfacl -p -- "$path" 2>/dev/null | grep -E "^(user:|group:|mask::|other::)"
-exit "$status"
+printf 'UID:GID %s:%s has read/traverse/list mode bits and no write mode bits throughout the source tree.\n' \
+    "$uid" "$gid"

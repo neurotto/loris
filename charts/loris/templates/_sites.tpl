@@ -1,8 +1,7 @@
 {{/*
-Site data sources. Each enabled site appears read-only at /data/loris/data/assembly_bids/<site>:
-  source: nfs   (default) an NFS PersistentVolume exported by the site (templates/site-volumes.yaml);
-  source: clone a central git-annex/DataLad clone directory on the LORIS data PVC, at
-                <siteClones.subPath>/<site>, written only by the external sync job that maintains it.
+Each enabled site appears read-only at /data/loris/data/assembly_bids/<site>:
+  source: nfs (default) the site's NFS PersistentVolume (templates/site-volumes.yaml);
+  source: pvc an existing claim in the release namespace, optionally at subPath.
 */}}
 {{- define "loris.siteSource" -}}
 {{- .source | default "nfs" -}}
@@ -10,26 +9,23 @@ Site data sources. Each enabled site appears read-only at /data/loris/data/assem
 
 {{- define "loris.siteMount" -}}
 {{- $site := index . 0 -}}
-{{- $root := index . 1 -}}
 {{- $name := index . 2 -}}
-{{- if eq (include "loris.siteSource" $site) "clone" }}
-- name: loris-data
-  mountPath: /data/loris/data/assembly_bids/{{ $site.name }}
-  subPath: {{ printf "%s/%s" $root.Values.siteClones.subPath $site.name | quote }}
-  readOnly: true
-{{- else }}
 - name: {{ $name }}
   mountPath: /data/loris/data/assembly_bids/{{ $site.name }}
+  {{- if and (eq (include "loris.siteSource" $site) "pvc") $site.subPath }}
+  subPath: {{ $site.subPath | quote }}
+  {{- end }}
   readOnly: true
-{{- end }}
 {{- end -}}
 
 {{- define "loris.siteVolume" -}}
 {{- $site := index . 0 -}}
 {{- $name := index . 1 -}}
-{{- if ne (include "loris.siteSource" $site) "clone" }}
 - name: {{ $name }}
   persistentVolumeClaim:
+    {{- if eq (include "loris.siteSource" $site) "pvc" }}
+    claimName: {{ $site.claimName | quote }}
+    {{- else }}
     claimName: loris-bids-{{ $site.name }}
-{{- end }}
+    {{- end }}
 {{- end -}}

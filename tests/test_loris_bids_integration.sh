@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-image=${LORIS_IMAGE:-scilus/loris:29.0.0}
+image=${LORIS_IMAGE:-scilus/loris:29.0.0-chart0.5.0}
 database_image=${LORIS_DATABASE_IMAGE:-mariadb:10.11.10}
 for tool in docker openssl; do
     command -v "$tool" >/dev/null || { printf 'Missing prerequisite: %s\n' "$tool" >&2; exit 1; }

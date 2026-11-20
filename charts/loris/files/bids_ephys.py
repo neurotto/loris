@@ -6,12 +6,11 @@ their archives. A per-view artifact manifest records owned archive paths so
 recovery never treats arbitrary existing files as disposable importer outputs.
 Filesystem arguments are absolute pathlib.Path objects.
 
-RE-MOVE EEG viewing: a BrainVision recording is registered once, by its .vhdr
+On-demand EEG viewing registers a BrainVision recording once, by its .vhdr
 header (upstream registers the .vhdr, .vmrk and .eeg as three recordings).
-Recordings of git-annex clone sources are not chunked at import; their
-electrophysiology_chunked_dataset_path names the directory the re-move-cache
-service prepares on first view (re-move-chunks/<site>/<dataset>/<key>/<stem>.chunks).
-Other recordings are not chunked.
+Provider-backed recordings use a stable path derived from the logical source
+path. Local BrainVision and BDF recordings use the upstream chunk writer;
+other local formats retain upstream chunk generation.
 """
 
 from contextlib import contextmanager
@@ -20,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import tempfile
 
 from sqlalchemy import select, text
@@ -67,10 +67,9 @@ def remember(view, path, checksum):
             os.unlink(temporary)
 
 
-CHUNKS_DIR = 're-move-chunks'
+CONTENT_PROVIDER_CHUNKS_DIR = 'content-provider-chunks'
 CHUNKED_EXTENSIONS = ('.edf', '.set', '.vhdr', '.bdf')
-NAME_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}')
-KEY_RE = re.compile(r'[A-Z0-9]+(-[a-zA-Z][0-9]+)*--[A-Za-z0-9._,+=-]+')
+NAME_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$')
 
 
 def brainvision_primary(files):
@@ -103,33 +102,54 @@ class BrainVisionLayout:
 
 
 def lazy_chunk_path(data_dir, path):
-    """Return the on-demand chunk directory of a clone-sourced recording, else None.
+    """Return the on-demand chunk directory for a managed recording, else None.
 
-    path is the recording's data-root-relative FilePath. Its view link resolves
-    (lexically, as content may be dropped) to <data_dir>/assembly_bids/<site>/
-    <dataset>/.git/annex/objects/../<key>/<key>; the result is relative to
-    data_dir and matches what LORIS and re-move-cache derive from that link.
+    path is the recording's data-root-relative FilePath. Its view links resolve
+    to a file below <data_dir>/assembly_bids/<site>/<dataset>. The chunk path
+    hashes the logical source path and contains no provider-specific identifier.
     """
-    if path.suffix not in CHUNKED_EXTENSIONS:
+    if path.suffix not in CHUNKED_EXTENSIONS or not os.getenv('LORIS_CONTENT_PROVIDER_URL'):
         return None
 
     root = (data_dir / 'assembly_bids').resolve()
     target = data_dir / path
     for _ in range(8):
+        resource = provider_resource_path(root, target)
+        if resource is not None:
+            site, dataset, relative_path = resource
+            digest = hashlib.sha256(relative_path.encode()).hexdigest()
+            return Path(CONTENT_PROVIDER_CHUNKS_DIR, site, dataset, digest + '.chunks')
+
         if not target.is_symlink():
             break
+
         target = Path(os.path.normpath(target.parent.resolve() / os.readlink(target)))
 
+    return None
+
+
+def provider_resource_path(root, target):
+    """Return a provider-neutral site/dataset/path identity for a source target."""
     if not target.is_relative_to(root):
         return None
 
     parts = target.relative_to(root).parts
-    if (len(parts) < 7 or parts[2:5] != ('.git', 'annex', 'objects') or parts[-1] != parts[-2]
-            or not NAME_RE.fullmatch(parts[0]) or not NAME_RE.fullmatch(parts[1])
-            or not KEY_RE.fullmatch(parts[-1])):
+    try:
+        parts[1].encode('utf-8')
+    except (IndexError, UnicodeEncodeError):
         return None
 
-    return Path(CHUNKS_DIR, parts[0], parts[1], parts[-1], path.stem + '.chunks')
+    if (
+        len(parts) < 3
+        or not NAME_RE.fullmatch(parts[0])
+        or not parts[1]
+        or parts[1].startswith('.')
+        or re.fullmatch(r'import-.+', parts[0])
+        or any(part in ('', '.', '..', '.git') for part in parts[2:])
+    ):
+        return None
+
+    return parts[0], parts[1], Path(*parts[2:]).as_posix()
 
 
 def has_chunk_parameter(db, file_id):
@@ -143,6 +163,41 @@ def has_chunk_parameter(db, file_id):
         'SELECT 1 FROM physiological_parameter_file ppf JOIN parameter_type pt USING (ParameterTypeID) '
         "WHERE ppf.PhysiologicalFileID = :id AND pt.Name = 'electrophysiology_chunked_dataset_path' LIMIT 1"
     ), {'id': file_id}).first() is not None
+
+
+@contextmanager
+def local_chunks(env, file):
+    """Generate BrainVision/BDF chunks using the pinned upstream chunk writer."""
+    import mne
+    from lib.config import get_data_dir_path_config
+    from lib.physio.chunking import get_dataset_chunks_dir_path
+    from loris_ephys_chunker.chunking import chunk_dir_path, write_chunk_directory
+
+    root = get_data_dir_path_config(env)
+    source = root / file.path
+    destination = get_dataset_chunks_dir_path(env, file)
+    generation = Path(tempfile.mkdtemp(prefix='.loris-chunks-', dir=destination))
+    committed = False
+    reader = {'.vhdr': mne.io.read_raw_brainvision, '.bdf': mne.io.read_raw_bdf}[source.suffix]
+    try:
+        with reader(source, preload=False) as recording:
+            names = recording.ch_names
+        for index, name in enumerate(names):
+            write_chunk_directory(
+                path=source, chunk_size=5000, destination=generation,
+                loader=lambda path, name=name: reader(path, preload=False).pick([name]),
+                from_channel_index=index, from_channel_name=name, channel_count=1,
+            )
+        chunks = chunk_dir_path(source, destination=generation)
+        index_path = chunks / 'index.json'
+        metadata = json.loads(index_path.read_text())
+        metadata['shapes'] = [[len(names), *shape[1:]] for shape in metadata['shapes']]
+        index_path.write_text(json.dumps(metadata, indent=2))
+        yield chunks.relative_to(root)
+        committed = True
+    finally:
+        if not committed:
+            shutil.rmtree(generation)
 
 
 @contextmanager
@@ -221,13 +276,8 @@ def resumable_ephys(view):
         return fetched + existing
 
     def chunks(env, file):
-        """Register on-demand chunks for clone-sourced recordings.
-
-        Other recordings are not chunked: upstream chunking at import exits the
-        whole import on any unreadable recording.
-        """
+        """Register provider chunks or generate supported local recording chunks."""
         from lib.config import get_data_dir_path_config
-        from lib.logging import log
         from lib.physio.parameters import insert_physio_file_parameter
 
         if has_chunk_parameter(env.db, file.id):
@@ -235,7 +285,11 @@ def resumable_ephys(view):
 
         path = lazy_chunk_path(get_data_dir_path_config(env), Path(file.path))
         if path is None:
-            log(env, f"No signal chunks for '{file.path}': only clone-sourced recordings are chunked.")
+            if Path(file.path).suffix not in ('.vhdr', '.bdf'):
+                return original_chunks(env, file)
+            with local_chunks(env, file) as path:
+                insert_physio_file_parameter(env, file, 'electrophysiology_chunked_dataset_path', path)
+                env.db.commit()
             return
 
         insert_physio_file_parameter(env, file, 'electrophysiology_chunked_dataset_path', path)

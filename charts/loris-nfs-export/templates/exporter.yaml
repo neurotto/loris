@@ -1,3 +1,4 @@
+{{- include "loris-nfs-export.validate" . -}}
 {{- if and .Values.dataPath (gt (len .Values.allowedClientCIDRs) 0) }}
 apiVersion: apps/v1
 kind: Deployment
@@ -53,6 +54,21 @@ spec:
                 - |
                   cd /
                   test -d /export || { echo "ERROR: site data path is not mounted"; exit 1; }
+                  set -- $(stat -c '%a %u %g' /export)
+                  mode=$(printf '%s' "$1" | sed 's/.*\(...\)$/\1/')
+                  owner=$2
+                  group=$3
+                  if [ "$owner" = "{{ .Values.exportUid | int64 }}" ]; then
+                    class=$(printf '%s' "$mode" | cut -c1)
+                  elif [ "$group" = "{{ .Values.exportGid | int64 }}" ]; then
+                    class=$(printf '%s' "$mode" | cut -c2)
+                  else
+                    class=$(printf '%s' "$mode" | cut -c3)
+                  fi
+                  [ $((class & 5)) -eq 5 ] || {
+                    echo "ERROR: export root lacks read/traverse mode bits for {{ .Values.exportUid | int64 }}:{{ .Values.exportGid | int64 }}"
+                    exit 1
+                  }
                   setpriv --reuid={{ .Values.exportUid | int64 }} --regid={{ .Values.exportGid | int64 }} --clear-groups -- \
                     sh -c 'test -r /export && test -x /export && find /export -mindepth 1 -maxdepth 1 -print -quit >/dev/null' \
                     || { echo "ERROR: site data path is not readable/listable by {{ .Values.exportUid | int64 }}:{{ .Values.exportGid | int64 }}"; exit 1; }

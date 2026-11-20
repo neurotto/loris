@@ -4,8 +4,10 @@ Argo manages per-site discovery CronJobs; discovery creates immutable worker
 attempts at runtime. MariaDB, not Kubernetes Job history, records completion.
 Dataset identity is the site/folder pair, while the registered import-view path
 stays stable across attempts so upstream can recognize already registered files.
-Sites with source: clone read a versioned central git-annex clone: fingerprints use
-annex keys instead of content, and additive dataset updates are imported again.
+Source fingerprints include file paths and content; changed published datasets
+require review rather than silently updating existing registrations. Sites can opt
+in to identifying in-dataset file symlinks by target (symlinkedContent: identity),
+so content may be absent, and to importing additive changes (updates: additive).
 
 The CLI consumes a generated runtime.json containing namespace, cronJob, site,
 and common bidsImport settings. Database credentials come from the LORIS config.py
@@ -28,8 +30,10 @@ import ssl
 import sys
 import urllib.error
 import urllib.request
+import zlib
 
-from sqlalchemy import Column, Integer, MetaData, String, Table, Text, insert, select, text, update
+from sqlalchemy import (Column, Integer, LargeBinary, MetaData, String, Table, Text, delete, insert, select, text,
+                        update)
 
 
 ROOT = Path('/data/loris/data')
@@ -53,6 +57,12 @@ DATASETS = Table(
     Column('updated_at', String(40), nullable=False),
     Column('error', Text),
 )
+# Per-file digests of additive datasets, so updates can prove imported files are unchanged.
+MANIFESTS = Table(
+    'scilus_bids_manifests', METADATA,
+    Column('dataset_id', String(64), primary_key=True),
+    Column('entries', LargeBinary(2 ** 32 - 1), nullable=False),
+)
 ATTEMPTS = Table(
     'scilus_bids_attempts', METADATA,
     Column('dataset_id', String(64), primary_key=True),
@@ -68,6 +78,15 @@ SETTING_KEYS = {
 }
 IDENTITY_KEYS = ('project', 'projectAlias', 'siteAlias', 'cohort', 'defaultVisit',
                  'datasetType', 'recruitmentTarget', 'subjectPrefix')
+
+
+def site_options(site):
+    """Return (symlink_identity, additive) from a site's opt-in import settings."""
+    settings = site.get('bidsImport') or {}
+    content, updates = settings.get('symlinkedContent', 'resolve'), settings.get('updates', 'reject')
+    if content not in ('resolve', 'identity') or updates not in ('reject', 'additive'):
+        raise ValueError('Unsupported symlinkedContent or updates setting')
+    return content == 'identity', updates == 'additive'
 
 
 def now():
@@ -124,7 +143,7 @@ def resolve_settings(config, folder, metadata_name):
     settings.update({key: value for key, value in site['bidsImport'].items() if key in SETTING_KEYS})
     override = site['bidsImport'].get('datasets', {}).get(folder, {})
 
-    unknown = set(override) - SETTING_KEYS - {'enabled'}
+    unknown = set(override) - SETTING_KEYS - {'enabled', 'acceptFingerprint'}
     if unknown:
         raise ValueError('Unknown dataset override keys: ' + ', '.join(sorted(unknown)))
 
@@ -200,18 +219,19 @@ def read_name(source):
     return name
 
 
-def source_fingerprint(source):
+def source_fingerprint(source, symlink_identity=False, entries=None):
     """Hash relative file paths and contents to detect published dataset changes.
 
     Root-level derivatives and .git are excluded. File symlinks must resolve within
-    the dataset; directory symlinks and non-regular files are rejected. Locked
-    git-annex files hash their annex key (already a content hash), so dropped
-    content is not needed. Other files are read in full, which can be expensive.
+    the dataset; directory symlinks and non-regular files are rejected. With
+    symlink_identity, file symlinks hash their in-dataset target path instead of
+    content, which may then be absent; use it only for content-addressed targets.
+    A dict passed as entries receives each relative file path's digest.
     """
+    view = helper('bids-view')
     if not source.is_dir():
         raise ValueError('Dataset source does not exist')
 
-    view = helper('bids-view')
     digest = hashlib.sha256()
 
     def unreadable(error):
@@ -232,10 +252,13 @@ def source_fingerprint(source):
                 continue
 
             path = current / name
-            annexed = view.annex_object(source, path)
-            if annexed is not None:
+            if symlink_identity and path.is_symlink():
+                target = view.contained_link(source, path).relative_to(source.resolve())
+                file_digest = hashlib.sha256(b'symlink\0' + encoded(str(target)).encode()).digest()
                 digest.update(encoded(str(path.relative_to(source))).encode())
-                digest.update(hashlib.sha256(b'git-annex-key\0' + annexed.name.encode()).digest())
+                digest.update(file_digest)
+                if entries is not None:
+                    entries[str(path.relative_to(source))] = file_digest.hex()
                 continue
 
             resolved = path.resolve(strict=True)
@@ -252,6 +275,8 @@ def source_fingerprint(source):
                     content.update(block)
 
             digest.update(content.digest())
+            if entries is not None:
+                entries[str(path.relative_to(source))] = content.hexdigest()
 
         directories.sort()
 
@@ -320,35 +345,62 @@ def registration(settings):
     return {key: settings.get(key) for key in IDENTITY_KEYS}
 
 
-def enroll(engine, site, folder, settings, metadata_name, view_path=None, fingerprint=None, allow_update=False):
+def enroll(engine, site, folder, settings, metadata_name, view_path=None, fingerprint=None,
+           additive=False, symlink_identity=False, accepted_fingerprint=None):
     """Register an immutable dataset definition and return its stable identity.
 
     Existing definitions must match registration settings, Name, and fingerprint;
     a known Name under another folder is rejected as a possible rename. With
-    allow_update (versioned clone sources), an idle dataset whose fingerprint
-    changed is re-armed: completed modes reset so the update is imported. An
-    omitted fingerprint is computed from the site's source tree. view_path can
+    additive, per-file digests are recorded with the fingerprint, and an idle
+    dataset whose fingerprint changed is re-armed only if every recorded file
+    except participants.tsv is unchanged: completed modes reset so additions are
+    imported. Datasets recorded without digests get them while unchanged; a change
+    before then is accepted only when accepted_fingerprint, set by an operator
+    after verifying the imported files, equals the new fingerprint. An omitted fingerprint
+    is computed from the site's source tree; additive enrollment always computes it. view_path can
     preserve a verified legacy view; otherwise a deterministic path is assigned.
     Callers must hold the site's discovery lock to serialize enrollment.
     """
     identity = dataset_id(site, folder)
-    fingerprint = fingerprint or source_fingerprint(ROOT / 'assembly_bids' / site / folder)
+    entries = {} if additive else None
+    if fingerprint is None or additive:
+        computed = source_fingerprint(ROOT / 'assembly_bids' / site / folder, symlink_identity, entries)
+        if fingerprint not in (None, computed):
+            raise ValueError('Provided fingerprint does not match the dataset source')
+
+        fingerprint = computed
+
     with engine.begin() as connection:
         row = connection.execute(select(DATASETS).where(DATASETS.c.id == identity)).mappings().one_or_none()
         if row is not None:
             if row['metadata_name'] != metadata_name or registration(json.loads(row['settings'])) != registration(settings):
                 raise ValueError('Known dataset identity/configuration changed; review migration instead of reimporting')
 
+            recorded = _manifest(connection, identity) if additive else None
             if row['fingerprint'] != fingerprint:
-                if not allow_update:
+                if not additive:
                     raise ValueError('Published dataset content changed; review migration instead of reimporting')
 
                 if row['status'] in ('reserved', 'running'):
                     raise ValueError('Dataset changed during an active attempt; it is retried after that attempt')
 
+                if recorded is None and accepted_fingerprint != fingerprint:
+                    raise ValueError('Published dataset changed before file digests were recorded; verify that '
+                                     'imported files are unchanged, then set bidsImport.datasets.' + folder
+                                     + '.acceptFingerprint to ' + fingerprint)
+
+                changed = sorted(path for path, digest in (recorded or {}).items()
+                                 if path != 'participants.tsv' and entries.get(path) != digest)
+                if changed:
+                    raise ValueError('Published dataset changed or removed imported files; review migration '
+                                     'instead of reimporting: ' + ', '.join(changed[:5]))
+
                 connection.execute(update(DATASETS).where(DATASETS.c.id == identity).values(
                     fingerprint=fingerprint, completed_modes='[]', status='updated', updated_at=now(), error=None,
                 ))
+                _record_manifest(connection, identity, entries)
+            elif additive and recorded is None:
+                _record_manifest(connection, identity, entries)
 
             return identity
 
@@ -372,8 +424,22 @@ def enroll(engine, site, folder, settings, metadata_name, view_path=None, finger
             attempt=0,
             updated_at=now(),
         ))
+        if additive:
+            _record_manifest(connection, identity, entries)
 
     return identity
+
+
+def _manifest(connection, identity):
+    """Return a dataset's recorded file digests, or None when none were recorded."""
+    stored = connection.scalar(select(MANIFESTS.c.entries).where(MANIFESTS.c.dataset_id == identity))
+    return None if stored is None else json.loads(zlib.decompress(stored))
+
+
+def _record_manifest(connection, identity, entries):
+    connection.execute(delete(MANIFESTS).where(MANIFESTS.c.dataset_id == identity))
+    connection.execute(insert(MANIFESTS).values(
+        dataset_id=identity, entries=zlib.compress(encoded(entries).encode())))
 
 
 def adopt_dataset(engine, site, folder, settings, metadata_name, view_path, locked=False):
@@ -726,8 +792,10 @@ def discover(engine, config, api):
                 name = read_name(folder)
                 settings = resolve_settings(config, folder.name, name)
                 helper('bids-view').inspect_source(folder, settings.get('subjectPrefix', ''))
-                identity = enroll(engine, site['name'], folder.name, settings, name,
-                                  allow_update=site.get('source') == 'clone')
+                symlink_identity, additive = site_options(site)
+                accepted = site['bidsImport'].get('datasets', {}).get(folder.name, {}).get('acceptFingerprint')
+                identity = enroll(engine, site['name'], folder.name, settings, name, additive=additive,
+                                  symlink_identity=symlink_identity, accepted_fingerprint=accepted)
                 row = get_dataset(engine, identity)
                 if row['status'] in ('reserved', 'running'):
                     if not reconcile(engine, api, row, cron, profile):
@@ -909,15 +977,13 @@ def import_dataset(view, settings):
         path = get_loris_bids_file_path(import_env, session, bids_info.data_type, acquisition.nifti_path)
 
         existing = try_get_file_with_path(env.db, path)
-        # Clone sources keep only new content during updates; registered files may be dropped.
         if existing is not None:
             from lib.config import get_data_dir_path_config
             previews = helper('bids_previews')
             root = get_data_dir_path_config(env)
             if not previews.preview_valid(env.db, existing, root):
                 if not acquisition.nifti_path.is_file():
-                    raise ValueError('Registered MRI preview is missing and source content is not cached; '
-                                     'run the approved preview-only repair before retrying import')
+                    raise ValueError('Registered MRI preview is missing and source content is unavailable')
                 create_nifti_preview_picture(env, existing)
                 if not previews.preview_valid(env.db, existing, root):
                     raise ValueError('Registered MRI preview could not be verified after generation')
@@ -1002,7 +1068,8 @@ def worker(engine, config, identity, attempt):
             if not os.statvfs(source).f_flag & os.ST_RDONLY:
                 raise ValueError('BIDS source must be mounted read-only')
 
-            if source_fingerprint(source) != row['fingerprint']:
+            symlink_identity, additive = site_options(site)
+            if source_fingerprint(source, symlink_identity) != row['fingerprint']:
                 raise ValueError('Published dataset changed after discovery')
 
             if settings['mode'] != 'preflight':
@@ -1018,8 +1085,8 @@ def worker(engine, config, identity, attempt):
 
                 helper('bids-view').prepare_view(source, view, settings['project'], row['site'],
                                                 settings['cohort'], reuse=True,
-                                                extend=site.get('source') == 'clone',
-                                                subject_prefix=settings.get('subjectPrefix', ''))
+                                                subject_prefix=settings.get('subjectPrefix', ''),
+                                                symlink_identity=symlink_identity, additive=additive)
                 outcome.update(import_dataset(view, settings))
 
             record(engine, identity, attempt, 'succeeded')
