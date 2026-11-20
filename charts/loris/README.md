@@ -8,7 +8,7 @@ This chart packages a **development deployment**, not a production-certified
 LORIS installation. It uses a custom image containing LORIS and LORIS-MRI
 **29.0.0**, an automated installer, and viewer, Module Manager and
 provider-neutral content patches.
-Chart version: **0.5.0**.
+Chart version: **0.5.1**.
 
 > **Important:** The chart is disabled by default (`enabled: false`). Enabling it
 > without configuring persistence uses ephemeral storage for the database,
@@ -143,8 +143,8 @@ you provisioned. If you change `loris.servicePort`, adjust the port-forward's
 remote port accordingly.
 
 The portal's init containers seed the project directory, initialize a new
-database using the LORIS installer, write project configuration, and activate
-required modules. No manual SQL or browser-based installation is needed.
+database using the LORIS installer, write project configuration, replace a
+non-compliant API `JWTKey`, and activate required modules. No manual SQL or browser-based installation is needed.
 Existing initialized databases are checked rather than reinstalled; a partial
 bootstrap causes an explicit failure.
 
@@ -668,6 +668,12 @@ patched Module Manager. Additional required modules must exist in the installed
 LORIS release or startup fails. Other modules remain administrator-managed;
 portal restarts and GitOps syncs do not reset their activation state.
 
+The LORIS installer generates an alphanumeric `JWTKey`, which the API login
+endpoint rejects because it requires a symbol, so `POST /api/v0.0.3/login`
+fails with HTTP 500. On each portal start, the `ensure-loris-jwt-key` init
+container replaces a non-compliant key with a random 64-character key. A
+compliant key, including one set by an administrator, is never rotated.
+
 ## Operations and troubleshooting
 
 Inspect rollout, storage, and initialization:
@@ -677,6 +683,7 @@ kubectl -n loris get pods,pvc
 kubectl -n loris describe deployment loris
 kubectl -n loris logs deployment/loris -c prepare-loris-state
 kubectl -n loris logs deployment/loris -c install-loris
+kubectl -n loris logs deployment/loris -c ensure-loris-jwt-key
 kubectl -n loris logs deployment/loris -c activate-loris-modules
 kubectl -n loris logs deployment/loris -c loris
 kubectl -n loris logs statefulset/loris-mariadb

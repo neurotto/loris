@@ -41,7 +41,7 @@ rendered=$(render_chart '{"enabled": true}')
 assert_resources 'tag-only image remains supported for the app and all init containers' '
     [.[] | select(.kind == "Deployment" and .metadata.name == "loris") |
         .spec.template.spec | (.containers + .initContainers)[] | .image] |
-    length == 4 and all(.[]; . == "docker.io/scilus/loris:29.0.0-chart0.5.0")'
+    length == 5 and all(.[]; . == "docker.io/scilus/loris:29.0.0-chart0.5.0")'
 
 digest="sha256:$(printf '%064d' 1)"
 values=$(printf '{"enabled":true,"image":{"digest":"%s"},"loris":{"data":{"persistence":{"enabled":true}}},
@@ -52,7 +52,7 @@ assert_resources 'digest pins the app, bootstrap, discovery and ledger initializ
     [.[] | select((.kind == "Deployment" and .metadata.name == "loris") or .kind == "CronJob") |
         (if .kind == "CronJob" then .spec.jobTemplate.spec else .spec end) |
         .template.spec | (.containers + (.initContainers // []))[] | .image] |
-    length == 6 and all(.[]; . == $image)' --arg image "docker.io/scilus/loris:29.0.0-chart0.5.0@$digest"
+    length == 7 and all(.[]; . == $image)' --arg image "docker.io/scilus/loris:29.0.0-chart0.5.0@$digest"
 
 if render_chart '{"enabled":true,"image":{"digest":"sha256:invalid"}}' >/dev/null 2>&1; then
     printf 'FAIL: invalid image digest must not render\n' >&2
@@ -105,9 +105,10 @@ assert_resources 'full dev portal uses pod-local emptyDir initialization with no
     ([.[] | select(.kind == "Deployment" and .metadata.name == "loris") | .spec.template.spec] |
         length == 1 and all(.[];
             ([.volumes[] | select(.emptyDir != null)] | length == 2) and
-            ([.initContainers[].name] == ["prepare-loris-state", "install-loris", "activate-loris-modules"]) and
+            ([.initContainers[].name] == ["prepare-loris-state", "install-loris", "ensure-loris-jwt-key",
+                "activate-loris-modules"]) and
             all(.initContainers[:2][]; [.volumeMounts[].name] == ["project-state", "loris-data"]) and
-            (.initContainers[2] | has("volumeMounts") | not) and
+            all(.initContainers[2:][]; has("volumeMounts") | not) and
             ([.containers[0].volumeMounts[].name] == ["project-state", "loris-data"])))'
 
 rendered=$(render_chart '{"enabled": true, "loris": {
@@ -414,6 +415,15 @@ assert_resources 'required LORIS modules are enforced by an unprivileged init co
             ([.initContainers[-1].env[].name] | index("MARIADB_ROOT_PASSWORD") == null) and
             .initContainers[-1].securityContext.runAsUser == 33 and
             .initContainers[-1].securityContext.allowPrivilegeEscalation == false)'
+
+assert_resources 'non-compliant installer JWT keys are replaced by an unprivileged init container' '
+    [.[] | select(.kind == "Deployment" and .metadata.name == "loris") | .spec.template.spec.initContainers[] |
+        select(.name == "ensure-loris-jwt-key")] |
+        length == 1 and all(.[];
+            (.command[2] | contains("JWTKey") and contains("random_int")) and
+            ([.env[].name] | index("MARIADB_ROOT_PASSWORD") == null) and
+            .securityContext.runAsUser == 33 and
+            .securityContext.allowPrivilegeEscalation == false)'
 
 rendered=$(render_chart '{"enabled": true, "loris": {"additionalRequiredModules": ["dashboard", "api"]}}')
 assert_resources 'additional required modules extend, but never replace, the built-in set' '
