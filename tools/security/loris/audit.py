@@ -187,6 +187,9 @@ def trivy_findings(data: dict, category: str, base: Path | None = None) -> list[
 
 
 class Audit:
+    # Chart-relative directories not required in Semgrep coverage (Semgrep ignores tests/ by default).
+    semgrep_unscanned: tuple[str, ...] = ()
+
     def __init__(self, output: Path, scratch: Path, kubernetes: str, image_source: str,
                  chart: Path = CHART) -> None:
         self.chart = chart
@@ -305,7 +308,8 @@ class Audit:
             if data.get("errors"):
                 raise CheckError("Semgrep reported scan/parse errors")
             scanned = data.get("paths", {}).get("scanned", [])
-            expected = {path.resolve() for path in self.chart.rglob("*") if path.suffix in {".py", ".php", ".mjs"}}
+            expected = {path.resolve() for path in self.chart.rglob("*") if path.suffix in {".py", ".php", ".mjs"}
+                        and path.relative_to(self.chart).parts[0] not in self.semgrep_unscanned}
             if not expected or not expected.issubset({Path(path).resolve() for path in scanned}):
                 raise CheckError("Semgrep did not cover every chart Python/PHP/JavaScript source")
             for issue in data.get("results", []):
@@ -450,7 +454,7 @@ class Audit:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--chart", choices=("loris", "loris-nfs-export"), default="loris")
+    parser.add_argument("--chart", choices=("loris", "loris-nfs-export", "loris-forgejo-export"), default="loris")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--kubernetes-version", default="1.33.0")
     parser.add_argument("--app-image")
@@ -460,8 +464,10 @@ def main() -> int:
     parser.add_argument("--runtime", action="store_true", help="Opt in to an owned disposable kind cluster")
     args = parser.parse_args()
     chart = ROOT / "charts" / args.chart
-    if args.chart == "loris-nfs-export" and args.database_image:
-        parser.error("--database-image does not apply to the exporter chart")
+    if args.chart != "loris" and args.database_image:
+        parser.error(f"--database-image does not apply to the {args.chart} chart")
+    if args.chart == "loris-forgejo-export" and args.runtime:
+        parser.error("--runtime is not supported for loris-forgejo-export; run the static/image audit only")
     if not re.fullmatch(r"\d+\.\d+\.\d+", args.kubernetes_version):
         parser.error("--kubernetes-version must be an explicit x.y.z version")
     if not re.fullmatch(r"linux/(amd64|arm64)", args.platform):
@@ -478,6 +484,9 @@ def main() -> int:
         if args.chart == "loris-nfs-export":
             from exporter import ExporterAudit
             audit = ExporterAudit(output, Path(temporary), args.kubernetes_version, args.image_source, chart)
+        elif args.chart == "loris-forgejo-export":
+            from forgejo import ForgejoExportAudit
+            audit = ForgejoExportAudit(output, Path(temporary), args.kubernetes_version, args.image_source, chart)
         else:
             audit = Audit(output, Path(temporary), args.kubernetes_version, args.image_source)
         audit.versions()
@@ -487,7 +496,8 @@ def main() -> int:
         app = args.app_image or f"{values['image']['repository']}:{values['image']['tag']}"
         if not args.app_image and values["image"].get("digest"):
             app += "@" + values["image"]["digest"]
-        image_name = "exporter" if args.chart == "loris-nfs-export" else "application"
+        image_name = {"loris-nfs-export": "exporter", "loris-forgejo-export": "forgejo-export"}.get(
+            args.chart, "application")
         audit.check(f"image/{image_name}", lambda: audit.image(image_name, app, args.platform))
         if args.chart == "loris":
             audit.check("image/database", lambda: audit.image(

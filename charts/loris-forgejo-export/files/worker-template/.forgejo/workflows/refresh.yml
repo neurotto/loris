@@ -1,0 +1,21 @@
+name: refresh
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: Registered dataset
+        required: true
+defaults:
+  run:
+    shell: bash
+jobs:
+  refresh:
+    runs-on: @RUNNER_LABEL@
+    timeout-minutes: 180
+    steps:
+      - name: Refresh the dataset repository
+        env:
+          DATASET: ${{ inputs.dataset }}
+        run: |
+          set -euo pipefail
+          @REQUEST_COMMAND@ refresh "$DATASET"

@@ -1,0 +1,19 @@
+name: probe
+on:
+  workflow_dispatch: {}
+defaults:
+  run:
+    shell: bash
+jobs:
+  probe:
+    runs-on: @RUNNER_LABEL@
+    timeout-minutes: 180
+    steps:
+      - name: Check the site and each registered dataset
+        run: |
+          set -euo pipefail
+          status=$(@REQUEST_COMMAND@ status)
+          printf '%s\n' "$status"
+          while IFS= read -r dataset; do
+            @REQUEST_COMMAND@ probe "$dataset"
+          done < <(jq -r '.datasets[]' <<<"$status")

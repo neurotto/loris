@@ -1,0 +1,23 @@
+diff --git a/loris_ephys_chunker/chunking.py b/loris_ephys_chunker/chunking.py
+--- a/loris_ephys_chunker/chunking.py
++++ b/loris_ephys_chunker/chunking.py
+@@ -248,7 +248,7 @@
+         channel_metadata,
+         chunk_size,
+-        valid_samples_in_last_chunk,
+         list(range(len(channel_chunks_list))),
++        valid_samples_in_last_chunk,
+         [list(downsampled.shape) for downsampled in channel_chunks_list]
+     )
+     write_chunks(chunk_dir, channel_chunks_list, from_channel_index)
+diff --git a/loris_ephys_chunker/scripts/edf_to_chunks.py b/loris_ephys_chunker/scripts/edf_to_chunks.py
+--- a/loris_ephys_chunker/scripts/edf_to_chunks.py
++++ b/loris_ephys_chunker/scripts/edf_to_chunks.py
+@@ -44,6 +44,6 @@
+             misc=None,
+             exclude=(),
+             infer_types=False,
+-            file_type=mne_edf.FileType.EDF,
++            preload=False,
+         )
+         channel_names = cast(list[str], edf_info['ch_names'])

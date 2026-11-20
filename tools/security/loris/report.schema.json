@@ -4,7 +4,7 @@
   "type": "object",
   "required": ["schema_version", "generated_at", "source_sha256", "kubernetes_version", "checks", "findings", "tools", "images", "commands", "limitations", "exit_code"],
   "properties": {
-    "chart": {"enum": ["loris", "loris-nfs-export"]},
+    "chart": {"enum": ["loris", "loris-nfs-export", "loris-forgejo-export"]},
     "schema_version": {"const": 1},
     "generated_at": {"type": "string"},
     "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},

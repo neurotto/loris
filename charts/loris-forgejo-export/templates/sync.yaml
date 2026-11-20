@@ -1,0 +1,23 @@
+{{- if include "loris-forgejo-export.enabled" . }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "loris-forgejo-export.fullname" . }}-sync
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list . "sync") | nindent 4 }}
+spec:
+  schedule: {{ .Values.sync.schedule | quote }}
+  {{- with .Values.sync.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  concurrencyPolicy: Forbid
+  suspend: {{ .Values.sync.suspend | default false }}
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "loris-forgejo-export.podLabels" (list . "sync") | nindent 8 }}
+    spec:
+      {{- include "loris-forgejo-export.syncJobSpec" . | nindent 6 }}
+{{- end }}

@@ -1,0 +1,83 @@
+{{- if and (include "loris-forgejo-export.enabled" .) .Values.triggers.argoEvents.enabled }}
+{{- $fullname := include "loris-forgejo-export.fullname" . }}
+{{- $argo := .Values.triggers.argoEvents }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-sensor
+  namespace: {{ $argo.namespace }}
+  labels:
+    {{- include "loris-forgejo-export.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-sensor
+  labels:
+    {{- include "loris-forgejo-export.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-webhook
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-sensor
+    namespace: {{ $argo.namespace }}
+---
+# Argo's webhook EventSource does not verify Forgejo signatures; sync
+# re-validates the repository against the registry and is idempotent.
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: {{ $fullname }}-sync
+  namespace: {{ $argo.namespace }}
+  labels:
+    {{- include "loris-forgejo-export.labels" . | nindent 4 }}
+spec:
+  template:
+    serviceAccountName: {{ $fullname }}-sensor
+  dependencies:
+    - name: push
+      eventSourceName: {{ $argo.eventSourceName | quote }}
+      eventName: {{ $argo.eventName | quote }}
+      filters:
+        dataLogicalOperator: and
+        data:
+          - path: header.X-Forgejo-Event.0
+            type: string
+            value: ["^push$"]
+          - path: body.ref
+            type: string
+            value: ["^refs/heads/.*$"]
+          - path: body.ref
+            type: string
+            comparator: "!="
+            value: ["^refs/heads/git-annex$"]
+          - path: body.repository.full_name
+            type: string
+            value: [{{ include "loris-forgejo-export.repositoryRegex" . | quote }}]
+  triggers:
+    - template:
+        name: sync
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                generateName: {{ $fullname }}-push-
+                namespace: {{ .Release.Namespace }}
+                labels:
+                  {{- include "loris-forgejo-export.podLabels" (list . "sync") | nindent 18 }}
+                annotations:
+                  loris-forgejo-export/triggered-by: argo-events
+              spec:
+                {{- include "loris-forgejo-export.syncJobSpec" . | nindent 16 }}
+          parameters:
+            # LFX_SYNC_REPOSITORY is the first env entry of syncPodSpec.
+            - src:
+                dependencyName: push
+                dataKey: body.repository.full_name
+              dest: spec.template.spec.containers.0.env.0.value
+{{- end }}

@@ -1,0 +1,29 @@
+name: stage-content
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: Registered dataset
+        required: true
+      commit:
+        description: Full commit the keys belong to
+        required: true
+      keys:
+        description: Space-separated SHA256E keys (at most 1000)
+        required: true
+defaults:
+  run:
+    shell: bash
+jobs:
+  stage:
+    runs-on: @RUNNER_LABEL@
+    timeout-minutes: 180
+    steps:
+      - name: Upload the requested content
+        env:
+          DATASET: ${{ inputs.dataset }}
+          COMMIT: ${{ inputs.commit }}
+          KEYS: ${{ inputs.keys }}
+        run: |
+          set -euo pipefail
+          @REQUEST_COMMAND@ stage "$DATASET"

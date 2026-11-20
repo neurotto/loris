@@ -5,6 +5,7 @@ on:
     paths:
       - charts/loris/**
       - charts/loris-nfs-export/**
+      - charts/loris-forgejo-export/**
       - tools/security/loris/**
       - .github/workflows/**
   push:
@@ -12,14 +13,15 @@ on:
     paths:
       - charts/loris/**
       - charts/loris-nfs-export/**
+      - charts/loris-forgejo-export/**
       - tools/security/loris/**
       - .github/workflows/**
   workflow_dispatch:
     inputs:
       chart:
-        description: Chart for optional runtime validation and image override
+        description: Chart for optional runtime validation (not loris-forgejo-export) and image override
         type: choice
-        options: [loris, loris-nfs-export]
+        options: [loris, loris-nfs-export, loris-forgejo-export]
         default: loris
       runtime:
         description: Run isolated kind runtime validation (additional CPU/disk required)
@@ -43,7 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        chart: [loris, loris-nfs-export]
+        chart: [loris, loris-nfs-export, loris-forgejo-export]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -79,7 +81,8 @@ jobs:
           retention-days: 14
 
   runtime:
-    if: github.event_name == 'workflow_dispatch' && inputs.runtime
+    # loris-forgejo-export has no runtime validation; its audit is static/image only.
+    if: github.event_name == 'workflow_dispatch' && inputs.runtime && inputs.chart != 'loris-forgejo-export'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:

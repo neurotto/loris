@@ -1,0 +1,6 @@
+apiVersion: v2
+name: loris-forgejo-export
+description: Central Forgejo-Aneksajo site export for LORIS (site organizations, dataset sync and on-demand content)
+type: application
+version: 0.1.0
+appVersion: 0.1.0
