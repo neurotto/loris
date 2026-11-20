@@ -65,6 +65,69 @@
     - name: loris-data
       mountPath: /data/loris
 {{- $root := . }}
+- name: ensure-loris-jwt-key
+  image: {{ include "loris.image" $root | quote }}
+  imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+  # The LORIS installer stores an alphanumeric JWTKey that the API login endpoint
+  # rejects as weak (it requires a symbol), so token login fails with HTTP 500.
+  # Replace a non-compliant key on start; a compliant key is never rotated.
+  command:
+    - php
+    - -r
+    - |
+      function isKeyStrong(string $key): bool {
+          return strlen($key) >= 20 && preg_match('/[0-9]/', $key) === 1
+              && preg_match('/[A-Za-z]/', $key) === 1 && preg_match('/[!$^@#%&*()]/', $key) === 1;
+      }
+      function pick(string $chars): string {
+          return $chars[random_int(0, strlen($chars) - 1)];
+      }
+      $db = new PDO('mysql:host=' . getenv('LORIS_DB_HOST') . ';dbname=' . getenv('LORIS_DB_NAME') . ';charset=utf8mb4',
+          getenv('LORIS_DB_USER'), getenv('LORIS_DB_PASSWORD'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+      $read = $db->prepare("SELECT c.Value FROM Config c JOIN ConfigSettings s ON c.ConfigID = s.ID WHERE s.Name = 'JWTKey'");
+      $read->execute();
+      if (isKeyStrong((string)$read->fetchColumn())) {
+          print("LORIS JWTKey is compliant\n");
+          exit(0);
+      }
+      $digits = '0123456789';
+      $letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      $symbols = '!$^@#%&*()';
+      $key = [pick($digits), pick($letters), pick($symbols)];
+      while (count($key) < 64) {
+          $key[] = pick($digits . $letters . $symbols);
+      }
+      for ($i = count($key) - 1; $i > 0; $i--) {
+          $j = random_int(0, $i);
+          [$key[$i], $key[$j]] = [$key[$j], $key[$i]];
+      }
+      $db->prepare("UPDATE Config c JOIN ConfigSettings s ON c.ConfigID = s.ID SET c.Value = ? WHERE s.Name = 'JWTKey'")
+          ->execute([implode('', $key)]);
+      $read->execute();
+      if (!isKeyStrong((string)$read->fetchColumn())) {
+          fwrite(STDERR, "LORIS JWTKey replacement verification failed\n");
+          exit(1);
+      }
+      print("LORIS JWTKey replaced with a compliant key\n");
+  env:
+    - name: LORIS_DB_HOST
+      value: loris-mariadb
+    - name: LORIS_DB_NAME
+      value: {{ $root.Values.database.name | quote }}
+    - name: LORIS_DB_USER
+      value: {{ $root.Values.loris.databaseUser | quote }}
+    - name: LORIS_DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: {{ $root.Values.database.secretName }}
+          key: {{ $root.Values.database.appPasswordKey }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 33
+    runAsGroup: 33
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
 {{- $modules := include "loris.requiredModules" . }}
 - name: activate-loris-modules
   image: {{ include "loris.image" $root | quote }}
