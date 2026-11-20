@@ -1,0 +1,32 @@
+# Synthetic two-Forgejo-site profile (same base values as
+# charts/loris-forgejo-export/tests/render.sh). The NFS site must be ignored.
+forgejo:
+  url: http://forgejo-http.forgejo.svc.cluster.local:3000
+  publicUrl: https://forge.example.org
+  publicIP: 192.0.2.80
+  adminSecret: {name: forgejo-admin}
+bidsImport: {enabled: true}
+sites:
+  - name: nfs-site
+    enabled: true
+    source: nfs
+    server: 192.0.2.1
+    nfsPort: 20490
+    bidsImport: {enabled: true}
+  - name: alpha
+    enabled: true
+    source: pvc
+    claimName: loris-data
+    subPath: forgejo/clones/alpha
+    bidsImport: {enabled: true, symlinkedContent: identity, updates: additive}
+    forgejo:
+      enabled: true
+      datasets: [Study_A, Study.B]
+      visibility: {Study_A: signed-in}
+  - name: beta
+    source: pvc
+    claimName: loris-data
+    subPath: forgejo/clones/beta
+    forgejo:
+      enabled: true
+      datasets: [Study_C]

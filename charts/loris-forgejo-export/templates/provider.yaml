@@ -1,0 +1,121 @@
+{{- if include "loris-forgejo-export.enabled" . }}
+{{- $fullname := include "loris-forgejo-export.fullname" . }}
+{{- $cache := .Values.provider.cache }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-provider
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list . "provider") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "loris-forgejo-export.selectorLabels" (list . "provider") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "loris-forgejo-export.podLabels" (list . "provider") | nindent 8 }}
+      annotations:
+        {{- include "loris-forgejo-export.checksumAnnotations" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "loris-forgejo-export.podSecurityContext" . | nindent 8 }}
+      {{- with include "loris-forgejo-export.scheduling" . }}{{ . | indent 6 }}{{- end }}
+      containers:
+        - {{ include "loris-forgejo-export.container" (list . "provider") | nindent 10 | trim }}
+          env:
+            {{- include "loris-forgejo-export.commonEnv" . | nindent 12 }}
+            - name: LFX_ANNEX_URL
+              value: {{ .Values.forgejo.annexUrl | default "" | quote }}
+            - name: LFX_PORT
+              value: {{ .Values.provider.port | quote }}
+            - name: LFX_CACHE_IDLE_TTL
+              value: {{ $cache.idleTTL | quote }}
+            - name: LFX_CACHE_MAX_AGE
+              value: {{ $cache.maxAge | quote }}
+            - name: LFX_CACHE_MAX_BYTES
+              value: {{ $cache.maxBytes | int64 | quote }}
+            - name: LFX_CACHE_SWEEP_SECONDS
+              value: {{ $cache.sweepSeconds | quote }}
+            - name: LFX_CACHE_OFFLINE_AFTER
+              value: {{ $cache.offlineAfter | quote }}
+            - name: LFX_CACHE_BATCH_WINDOW
+              value: {{ $cache.batchWindow | quote }}
+            - name: LFX_CACHE_RETRY_AFTER
+              value: {{ $cache.retryAfter | quote }}
+            - name: LFX_CACHE_CHUNK_TIMEOUT
+              value: {{ $cache.chunkTimeout | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.provider.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.provider.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "loris-forgejo-export.scriptsVolumeMount" . | nindent 12 }}
+            {{- include "loris-forgejo-export.registryVolumeMount" . | nindent 12 }}
+            {{- include "loris-forgejo-export.botVolumeMount" . | nindent 12 }}
+            {{- include "loris-forgejo-export.clonesVolumeMount" . | nindent 12 }}
+            {{- include "loris-forgejo-export.chunksVolumeMount" . | nindent 12 }}
+            {{- include "loris-forgejo-export.tmpVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "loris-forgejo-export.scriptsVolume" . | nindent 8 }}
+        {{- include "loris-forgejo-export.registryVolume" . | nindent 8 }}
+        {{- include "loris-forgejo-export.botVolume" . | nindent 8 }}
+        {{- include "loris-forgejo-export.dataVolume" . | nindent 8 }}
+        {{- include "loris-forgejo-export.tmpVolume" . | nindent 8 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-provider
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list . "provider") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "loris-forgejo-export.selectorLabels" (list . "provider") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.provider.port }}
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-provider
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list . "provider") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "loris-forgejo-export.selectorLabels" (list . "provider") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- range .Values.loris.clientPodSelectors }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: {{ .Values.provider.port }}
+          protocol: TCP
+{{- end }}

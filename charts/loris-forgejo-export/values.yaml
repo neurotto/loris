@@ -1,0 +1,144 @@
+# Central Forgejo export for LORIS. Install in the LORIS namespace, next to an
+# existing LORIS release (chart >= 0.5.0) and an existing Forgejo-Aneksajo.
+# No resources are rendered while sites is empty.
+
+image:
+  repository: docker.io/scilus/loris-forgejo-export
+  tag: 0.1.0
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# Sites, in the same format as the LORIS chart's sites[] (share one values file
+# with LORIS). Only entries with forgejo.enabled are managed by this chart;
+# other entries (for example NFS sites) are ignored. A managed site must use:
+#   source: pvc
+#   claimName: <loris.dataClaim>
+#   subPath: <loris.clonesSubPath>/<name>
+#   forgejo:
+#     enabled: true
+#     datasets: [Study_A, Study_B]    # one repository per dataset
+#     visibility: {Study_A: signed-in}  # optional; default private
+# Importing sites also need bidsImport.symlinkedContent: identity and
+# bidsImport.updates: additive.
+sites: []
+# Common LORIS import settings (LORIS chart bidsImport); only enabled is read.
+bidsImport:
+  enabled: false
+
+loris:
+  # LORIS data PersistentVolumeClaim in this namespace.
+  dataClaim: loris-data
+  # Dataset copies live at <clonesSubPath>/<site>/<dataset> in the claim.
+  clonesSubPath: forgejo/clones
+  # LORIS data directory holding provider EEG chunks (LORIS contentProvider contract).
+  chunksSubPath: data/content-provider-chunks
+  # LORIS discovery CronJobs are named <importCronJobPrefix><site>.
+  importCronJobPrefix: loris-bids-
+  # Pods allowed to call the content provider.
+  clientPodSelectors:
+    - app.kubernetes.io/name: loris
+    - app.kubernetes.io/name: loris-bids
+  # LORIS data owner; every pod writing to the claim runs as this user.
+  runAsUser: 33
+  runAsGroup: 33
+
+forgejo:
+  # In-cluster Forgejo-Aneksajo HTTP URL used by the chart's pods.
+  url: ""
+  # Public Forgejo URL that site runners and site publication use (required).
+  publicUrl: ""
+  # Accept an http publicUrl. Site tokens then travel unencrypted: tests and
+  # isolated networks only.
+  allowInsecurePublicUrl: false
+  # Optional IP the site workers pin for publicUrl's host.
+  publicIP: ""
+  # Optional annex+http://.../git-annex-p2phttp override for in-cluster transfers.
+  annexUrl: ""
+  # Existing Secret with Forgejo administrator credentials (reconciler only).
+  adminSecret:
+    name: ""
+    usernameKey: username
+    passwordKey: password
+  # Site organization = <organizationPrefix><site>.
+  organizationPrefix: ""
+  # Restricted bot used by sync and the provider; default <organizationPrefix>loris-export.
+  botUser: ""
+  # Per-site publication bot = <organization><publicationBotSuffix>.
+  publicationBotSuffix: -worker
+  # Team granting site users and the publication bot write on dataset repositories.
+  publicationTeam: datasets
+  # Team granting the export bot access to every repository of a site organization.
+  exportTeam: loris-export
+  # Contract with the site worker (installed separately on each site).
+  worker:
+    repository: .worker
+    runnerLabel: loris-forgejo-worker
+    requestCommand: loris-forgejo-request
+    # Organization Actions variables/secret names: <prefix>FORGE_URL, <prefix>FORGE_IP, <prefix>WORKER_TOKEN.
+    variablePrefix: LORIS_FORGEJO_
+    # Replaces the bundled .worker files; keys are repository paths.
+    templateFiles: {}
+
+reconciler:
+  schedule: "17 3 * * *"
+  timeZone: Etc/UTC
+  # Writes <release>-enrollment-<site> Secrets with the site runner and publication tokens.
+  enrollment:
+    enabled: true
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
+sync:
+  schedule: "41 * * * *"
+  timeZone: Etc/UTC
+  suspend: false
+  # Per staging batch, including the site's admission queue, and per import.
+  stageTimeout: 10800
+  importTimeout: 10800
+  activeDeadlineSeconds: 14400
+  ttlSecondsAfterFinished: 86400
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 2Gi}
+
+provider:
+  port: 8080
+  cache:
+    idleTTL: 3600
+    maxAge: 86400
+    maxBytes: 2147483648
+    sweepSeconds: 600
+    offlineAfter: 60
+    batchWindow: 1
+    retryAfter: 5
+    chunkTimeout: 3600
+  # Must cover cache.maxBytes when the LORIS data volume is RAM-backed.
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 3Gi}
+
+triggers:
+  # With both triggers disabled, datasets sync on sync.schedule only.
+  # Built-in receiver for signed Forgejo push webhooks.
+  webhook:
+    enabled: true
+    # Existing Secret (key: secret) with the webhook HMAC secret; generated when empty.
+    # Surrounding whitespace is ignored on both sides of the signature.
+    existingSecret: ""
+    resources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {memory: 128Mi}
+  # Optional Argo Events Sensor creating sync Jobs from an existing EventSource
+  # (replaces the built-in receiver; set webhook.enabled: false).
+  argoEvents:
+    enabled: false
+    namespace: argo-events
+    eventSourceName: ""
+    eventName: ""
+    # URL of the EventSource that Forgejo webhooks are sent to.
+    webhookUrl: ""
+
+nodeSelector: {}
+affinity: {}
+tolerations: []

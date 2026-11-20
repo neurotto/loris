@@ -1,0 +1,107 @@
+{{- if and (include "loris-forgejo-export.enabled" .) .Values.triggers.webhook.enabled }}
+{{- $fullname := include "loris-forgejo-export.fullname" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-webhook
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list . "webhook") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "loris-forgejo-export.selectorLabels" (list . "webhook") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "loris-forgejo-export.podLabels" (list . "webhook") | nindent 8 }}
+      annotations:
+        {{- include "loris-forgejo-export.checksumAnnotations" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $fullname }}-webhook
+      securityContext:
+        {{- include "loris-forgejo-export.podSecurityContext" . | nindent 8 }}
+      {{- with include "loris-forgejo-export.scheduling" . }}{{ . | indent 6 }}{{- end }}
+      containers:
+        - {{ include "loris-forgejo-export.container" (list . "webhook") | nindent 10 | trim }}
+          env:
+            {{- include "loris-forgejo-export.commonEnv" . | nindent 12 }}
+            - name: LFX_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: LFX_FULLNAME
+              value: {{ $fullname | quote }}
+            - name: LFX_PORT
+              value: "8080"
+            - name: LFX_SYNC_CRONJOB
+              value: {{ printf "%s-sync" $fullname | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.triggers.webhook.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "loris-forgejo-export.scriptsVolumeMount" . | nindent 12 }}
+            {{- include "loris-forgejo-export.registryVolumeMount" . | nindent 12 }}
+            - name: webhook-secret
+              mountPath: /var/run/secrets/loris-forgejo-export/webhook
+              readOnly: true
+            {{- include "loris-forgejo-export.tmpVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "loris-forgejo-export.scriptsVolume" . | nindent 8 }}
+        {{- include "loris-forgejo-export.registryVolume" . | nindent 8 }}
+        - name: webhook-secret
+          secret:
+            secretName: {{ include "loris-forgejo-export.webhookSecret" . }}
+            items:
+              - key: secret
+                path: secret
+            defaultMode: 0440
+        {{- include "loris-forgejo-export.tmpVolume" . | nindent 8 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-webhook
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list . "webhook") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "loris-forgejo-export.selectorLabels" (list . "webhook") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+---
+# Any source may call the receiver; requests are HMAC-verified.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-webhook
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list . "webhook") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "loris-forgejo-export.selectorLabels" (list . "webhook") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: 8080
+          protocol: TCP
+{{- end }}

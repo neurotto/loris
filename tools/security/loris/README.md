@@ -13,8 +13,10 @@ Select the chart with `--chart`:
 
 - `--chart loris` (the default) audits the portal.
 - `--chart loris-nfs-export` audits the site exporter.
+- `--chart loris-forgejo-export` audits the central Forgejo export (static and
+  image checks only).
 
-Both share tool installation, reporting, severity gates, and CI, but use
+All share tool installation, reporting, severity gates, and CI, but use
 chart-specific profiles and runtime checks.
 
 > [!IMPORTANT]
@@ -173,6 +175,52 @@ in `finally`; no real site data is involved. Cleanup failure is an error.
 > If host/process failure interrupts cleanup, inspect `kind get clusters` and
 > remove only your `loris-nfs-audit-<unique-suffix>` cluster.
 
+## Forgejo export audit
+
+```sh
+python tools/security/loris/audit.py \
+  --chart loris-forgejo-export --output audit-results/loris-forgejo-export
+```
+
+Forgejo export coverage includes:
+
+- **Render profiles**:
+  - dormant defaults, required to render no resources;
+  - `two-site`: `profiles/forgejo-export.yaml`, the same synthetic two-Forgejo-site
+    (plus one ignored NFS site) values used by the chart's `tests/render.sh`;
+  - `pinned-digest`: the same values with a synthetic `image.digest`;
+  - exact validation failures for mutually exclusive triggers and for a
+    Forgejo-enabled NFS site.
+- **Schema and policy**: Helm lint, pinned Kubernetes schemas, and embedded Trivy
+  policies for both profiles and the image Dockerfile.
+- **Explicit assertions**, reported as per-resource `forgejo-export-*` findings
+  (never suppressed) for every reconciler, sync, provider and webhook pod:
+  - `runAsNonRoot` with uid 33, seccomp `RuntimeDefault`;
+  - `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`,
+    capabilities dropping `ALL` and adding none, not privileged;
+  - no `hostPath`, `hostNetwork`, `hostPID` or `hostIPC`;
+  - a memory limit on every container (CPU limits are not required);
+  - every container image pinned by digest when `image.digest` is set;
+  - provider `automountServiceAccountToken: false`;
+  - an Ingress NetworkPolicy selecting the provider and webhook pods;
+  - no ClusterRole/ClusterRoleBinding (or RoleBinding to a ClusterRole) and no
+    `*` in Role apiGroups, resources, verbs or resourceNames.
+  Missing reconciler, sync, provider or webhook workloads are an error.
+- **Source checks**: Semgrep over shipped chart Python (the unpackaged `tests/`
+  harness is skipped by Semgrep's default ignore and not required), a parse-only Python syntax check
+  of `files/*.py` (never imported or executed), ShellCheck and `bash -n` for
+  shell scripts, chart secrets and release/workflow checks.
+- **Image evidence**: a required immutable scan of the image built from the
+  chart's `image/` directory (default `image.repository:image.tag[@digest]`, or
+  `--app-image`) and `forgejo-export.cdx.json`. `--database-image` is rejected.
+
+> [!NOTE]
+> `--runtime` is rejected for this chart: no isolated-cluster validation is
+> implemented. NetworkPolicy checks prove presence and pod selection, not CNI
+> enforcement; the webhook port is intentionally open and relies on HMAC
+> signatures, which require manual review together with Forgejo admin, bot and
+> enrollment credentials.
+
 ## Audit pipeline
 
 ```mermaid
@@ -245,6 +293,8 @@ Required image scans by chart:
   reference. Application and database scans are required, even if a profile
   disables workloads.
 - **Exporter**: only its exporter image is required; no MariaDB scan is run.
+- **Forgejo export**: only its `forgejo-export` image is required; no MariaDB
+  scan is run.
 
 For an unpublished application image, supply a published replacement or an
 explicit local Docker image:
@@ -305,7 +355,8 @@ Output files:
   `report.schema.json`.
 - `application.cdx.json`, `database.cdx.json`: SBOMs generated from the same
   scanned portal image evidence when those scans succeed. Exporter audits
-  instead produce `exporter.cdx.json` when its image scan succeeds.
+  instead produce `exporter.cdx.json` and Forgejo export audits
+  `forgejo-export.cdx.json` when their image scan succeeds.
 
 ### Redaction
 
@@ -450,11 +501,12 @@ Workflow properties:
 - pinned external actions;
 - no `pull_request_target` event;
 - reports/SBOMs uploaded even if the audit step fails;
-- a static matrix that audits both charts independently with `fail-fast: false`
-  and separate artifacts;
+- a static matrix that audits all three charts independently with
+  `fail-fast: false` and separate artifacts;
 - runtime validation as a separate **manual-dispatch-only** job. For manual
   dispatch, select the chart for runtime validation and any optional image
-  override; a blank override uses that chart's values.
+  override; a blank override uses that chart's values. The runtime job is
+  skipped for `loris-forgejo-export`, which has no runtime validation.
 
 > [!CAUTION]
 > Do not make the runtime job available to untrusted contributors or privileged

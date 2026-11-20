@@ -1,0 +1,103 @@
+{{- if include "loris-forgejo-export.enabled" . }}
+{{- $fullname := include "loris-forgejo-export.fullname" . }}
+{{- $managed := include "loris-forgejo-export.managedSites" . | fromJsonArray }}
+{{- $importing := include "loris-forgejo-export.importingSites" . | fromJsonArray }}
+{{- $components := list "reconciler" "sync" }}
+{{- if .Values.triggers.webhook.enabled }}
+{{- $components = append $components "webhook" }}
+{{- end }}
+{{- range $component := $components }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-{{ $component }}
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list $ $component) | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-{{ $component }}
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list $ $component) | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-{{ $component }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-{{ $component }}
+    namespace: {{ $.Release.Namespace }}
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-reconciler
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list . "reconciler") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, update, patch]
+    resourceNames:
+      - {{ $fullname }}-bot
+      {{- if .Values.reconciler.enrollment.enabled }}
+      {{- range $managed }}
+      - {{ $fullname }}-enrollment-{{ .name }}
+      {{- end }}
+      {{- end }}
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, update]
+    resourceNames: [{{ $fullname }}-reconcile]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-sync
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list . "sync") | nindent 4 }}
+rules:
+  {{- if $importing }}
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    verbs: [get]
+    resourceNames:
+      {{- range $importing }}
+      - {{ $.Values.loris.importCronJobPrefix }}{{ . }}
+      {{- end }}
+  {{- end }}
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+{{- if or .Values.triggers.webhook.enabled .Values.triggers.argoEvents.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-webhook
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list . "webhook") | nindent 4 }}
+rules:
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    verbs: [get]
+    resourceNames: [{{ $fullname }}-sync]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create]
+{{- end }}
+{{- end }}

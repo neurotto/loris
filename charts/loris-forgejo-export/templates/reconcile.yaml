@@ -1,0 +1,33 @@
+{{- if include "loris-forgejo-export.enabled" . }}
+{{- $fullname := include "loris-forgejo-export.fullname" . }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-reconcile
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list . "reconciler") | nindent 4 }}
+spec:
+  schedule: {{ .Values.reconciler.schedule | quote }}
+  {{- with .Values.reconciler.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "loris-forgejo-export.podLabels" (list . "reconciler") | nindent 8 }}
+    spec:
+      {{- include "loris-forgejo-export.reconcileJobSpec" . | nindent 6 }}
+---
+# First reconcile at install, and again after every upgrade (not a Helm hook).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-reconcile-{{ .Release.Revision }}
+  labels:
+    {{- include "loris-forgejo-export.podLabels" (list . "reconciler") | nindent 4 }}
+spec:
+  {{- include "loris-forgejo-export.reconcileJobSpec" . | nindent 2 }}
+{{- end }}

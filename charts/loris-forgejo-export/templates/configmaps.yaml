@@ -1,0 +1,38 @@
+{{- if include "loris-forgejo-export.enabled" . }}
+{{- $fullname := include "loris-forgejo-export.fullname" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-scripts
+  labels:
+    {{- include "loris-forgejo-export.labels" . | nindent 4 }}
+{{- with include "loris-forgejo-export.scriptsData" . | fromJson }}
+data:
+  {{- toYaml . | nindent 2 }}
+{{- else }}
+data: {}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-registry
+  labels:
+    {{- include "loris-forgejo-export.labels" . | nindent 4 }}
+data:
+  registry.json: |
+    {{- include "loris-forgejo-export.registry" . | nindent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-worker-template
+  labels:
+    {{- include "loris-forgejo-export.labels" . | nindent 4 }}
+{{- with include "loris-forgejo-export.workerTemplateData" . | fromJson }}
+data:
+  {{- toYaml . | nindent 2 }}
+{{- else }}
+data: {}
+{{- end }}
+{{- end }}
